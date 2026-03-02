@@ -31,15 +31,16 @@ class ZephyrGateLogger:
         # Get logging configuration
         log_config = self.config.get('logging', {})
         log_level = log_config.get('level', 'INFO').upper()
-        log_file = log_config.get('file', 'logs/zephyrgate.log')
+        log_file = log_config.get('file') or None  # Convert empty string or null to None
         max_size = log_config.get('max_size', '10MB')
         backup_count = log_config.get('backup_count', 5)
         console_enabled = log_config.get('console', True)
         console_level = log_config.get('console_level', 'INFO').upper()
         
-        # Ensure log directory exists
-        log_path = Path(log_file)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Ensure log directory exists only if log_file is specified
+        if log_file:
+            log_path = Path(log_file)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
         
         # Configure structlog
         structlog.configure(

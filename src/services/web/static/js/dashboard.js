@@ -248,25 +248,95 @@ class ZephyrGateDashboard {
             }
             
             // Load recent messages
-            const messagesResponse = await this.apiRequest('/api/system/messages?limit=10');
+            const messagesResponse = await this.apiRequest('/api/messages/recent?limit=10');
             if (messagesResponse.ok) {
                 const messages = await messagesResponse.json();
                 this.updateRecentMessages(messages);
+            }
+            
+            // DISABLED: Load traceroute data - causes too many DB queries
+            // await this.loadTracerouteData();
+            
+            // Load system events
+            const eventsResponse = await this.apiRequest('/api/system/events?limit=10');
+            if (eventsResponse.ok) {
+                const events = await eventsResponse.json();
+                console.log('System events loaded:', events);
+                this.updateSystemEvents(events);
+            } else {
+                console.error('Failed to load system events:', eventsResponse.status, eventsResponse.statusText);
             }
         } catch (error) {
             console.error('Failed to load dashboard data:', error);
         }
     }
     
+    async loadTracerouteData() {
+        try {
+            // Load traceroute statistics
+            const statsResponse = await this.apiRequest('/api/traceroute/stats');
+            if (statsResponse.ok) {
+                const stats = await statsResponse.json();
+                console.log('Traceroute stats loaded:', stats);
+                this.updateTracerouteStats(stats);
+            } else {
+                console.error('Failed to load traceroute stats:', statsResponse.status, statsResponse.statusText);
+            }
+            
+            // Load traceroute history
+            const historyResponse = await this.apiRequest('/api/traceroute/history?limit=10');
+            if (historyResponse.ok) {
+                const history = await historyResponse.json();
+                console.log('Traceroute history loaded:', history);
+                this.updateTracerouteHistory(history);
+            } else {
+                console.error('Failed to load traceroute history:', historyResponse.status, historyResponse.statusText);
+            }
+            
+            // Load upcoming traceroutes
+            const upcomingResponse = await this.apiRequest('/api/traceroute/upcoming?limit=10');
+            if (upcomingResponse.ok) {
+                const upcoming = await upcomingResponse.json();
+                console.log('Upcoming traceroutes loaded:', upcoming);
+                this.updateUpcomingTraceroutes(upcoming);
+            } else {
+                console.error('Failed to load upcoming traceroutes:', upcomingResponse.status, upcomingResponse.statusText);
+            }
+        } catch (error) {
+            console.error('Failed to load traceroute data:', error);
+        }
+    }
+    
+    updateTracerouteStats(stats) {
+        const totalEl = document.getElementById('stat-total-nodes');
+        const directEl = document.getElementById('stat-direct-nodes');
+        const indirectEl = document.getElementById('stat-indirect-nodes');
+        const scheduledEl = document.getElementById('stat-scheduled-nodes');
+        
+        if (totalEl) totalEl.textContent = stats.total_active_nodes || 0;
+        if (directEl) directEl.textContent = stats.direct_nodes || 0;
+        if (indirectEl) indirectEl.textContent = stats.indirect_nodes || 0;
+        if (scheduledEl) scheduledEl.textContent = stats.scheduled_nodes || 0;
+    }
+    
     updateSystemStatus(status) {
-        document.getElementById('system-status').textContent = status.status;
-        document.getElementById('node-count').textContent = status.node_count;
-        document.getElementById('message-count').textContent = status.message_count;
-        document.getElementById('incident-count').textContent = status.active_incidents;
+        const systemStatusEl = document.getElementById('system-status');
+        const nodeCountEl = document.getElementById('node-count');
+        const messageCountEl = document.getElementById('message-count');
+        const incidentCountEl = document.getElementById('incident-count');
+        
+        if (systemStatusEl) systemStatusEl.textContent = status.status;
+        if (nodeCountEl) nodeCountEl.textContent = status.node_count;
+        if (messageCountEl) messageCountEl.textContent = status.message_count;
+        if (incidentCountEl) incidentCountEl.textContent = status.active_incidents;
         
         // Update status indicator
-        const indicator = document.querySelector('#system-status').parentElement.parentElement.querySelector('.status-indicator');
-        indicator.className = `status-indicator ${status.status === 'running' ? 'status-running' : 'status-stopped'}`;
+        if (systemStatusEl) {
+            const indicator = systemStatusEl.parentElement?.parentElement?.querySelector('.status-indicator');
+            if (indicator) {
+                indicator.className = `status-indicator ${status.status === 'running' ? 'status-running' : 'status-stopped'}`;
+            }
+        }
     }
     
     updateNodesTable(nodes) {
@@ -274,43 +344,146 @@ class ZephyrGateDashboard {
         if (!tbody) return;
         
         if (nodes.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" class="px-4 py-8 text-center text-gray-500">No nodes found</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" class="px-4 py-8 text-center text-gray-500">No nodes found</td></tr>';
             return;
         }
         
-        tbody.innerHTML = nodes.map(node => `
+        tbody.innerHTML = nodes.map(node => {
+            // Format name as "short_name - long_name"
+            let displayName = '';
+            if (node.short_name && node.long_name) {
+                displayName = `${node.short_name} - ${node.long_name}`;
+            } else if (node.short_name) {
+                displayName = node.short_name;
+            } else if (node.long_name) {
+                displayName = node.long_name;
+            } else {
+                displayName = 'Unknown';
+            }
+            
+            // Format hops with color coding
+            let hopsDisplay = 'N/A';
+            let hopsClass = '';
+            if (node.hops_away !== undefined && node.hops_away !== null && node.hops_away >= 0) {
+                hopsDisplay = node.hops_away;
+                // Color code based on hop count
+                if (node.hops_away === 0) {
+                    hopsClass = 'text-green-600 font-semibold'; // Direct connection
+                } else if (node.hops_away <= 2) {
+                    hopsClass = 'text-blue-600'; // Close
+                } else if (node.hops_away <= 4) {
+                    hopsClass = 'text-yellow-600'; // Medium distance
+                } else {
+                    hopsClass = 'text-red-600'; // Far away
+                }
+            }
+            
+            return `
             <tr class="border-b">
                 <td class="px-4 py-2 font-mono text-sm">${node.node_id}</td>
-                <td class="px-4 py-2">${node.short_name || node.long_name || 'Unknown'}</td>
+                <td class="px-4 py-2">${displayName}</td>
                 <td class="px-4 py-2">${node.hardware || 'Unknown'}</td>
                 <td class="px-4 py-2">
                     ${node.battery_level ? `${node.battery_level}%` : 'N/A'}
                 </td>
+                <td class="px-4 py-2 ${hopsClass}">${hopsDisplay}</td>
                 <td class="px-4 py-2">${this.formatTimestamp(node.last_seen)}</td>
             </tr>
-        `).join('');
+        `}).join('');
     }
     
     updateRecentMessages(messages) {
         const container = document.getElementById('recent-messages');
         if (!container) return;
         
-        if (messages.length === 0) {
+        if (!messages || messages.length === 0) {
             container.innerHTML = '<p class="text-gray-500 text-center py-4">No recent messages</p>';
             return;
         }
         
-        container.innerHTML = messages.map(msg => `
-            <div class="border-l-4 border-blue-500 pl-4 py-2">
+        container.innerHTML = messages.map(msg => {
+            // Get message type icon and color
+            let typeIcon = '💬';
+            let typeColor = 'blue';
+            let typeLabel = msg.message_type || 'TEXT';
+            
+            switch(msg.message_type) {
+                case 'TEXT':
+                    typeIcon = '💬';
+                    typeColor = 'blue';
+                    break;
+                case 'POSITION':
+                    typeIcon = '📍';
+                    typeColor = 'green';
+                    break;
+                case 'NODEINFO':
+                    typeIcon = 'ℹ️';
+                    typeColor = 'purple';
+                    break;
+                case 'TELEMETRY':
+                    typeIcon = '📊';
+                    typeColor = 'orange';
+                    break;
+                case 'ROUTING':
+                    typeIcon = '🔀';
+                    typeColor = 'gray';
+                    break;
+                case 'TRACEROUTE':
+                    typeIcon = '🗺️';
+                    typeColor = 'indigo';
+                    break;
+                default:
+                    typeIcon = '📨';
+                    typeColor = 'gray';
+            }
+            
+            // Format content based on message type
+            let displayContent = '';
+            if (msg.content && msg.content.trim()) {
+                displayContent = this.escapeHtml(msg.content);
+                // Truncate long messages
+                if (displayContent.length > 100) {
+                    displayContent = displayContent.substring(0, 100) + '...';
+                }
+            } else {
+                // No text content, show message type description
+                switch(msg.message_type) {
+                    case 'POSITION':
+                        displayContent = '<em class="text-gray-500">Location update</em>';
+                        break;
+                    case 'NODEINFO':
+                        displayContent = '<em class="text-gray-500">Node information</em>';
+                        break;
+                    case 'TELEMETRY':
+                        displayContent = '<em class="text-gray-500">Device telemetry</em>';
+                        break;
+                    case 'ROUTING':
+                        displayContent = '<em class="text-gray-500">Routing message</em>';
+                        break;
+                    case 'TRACEROUTE':
+                        displayContent = '<em class="text-gray-500">Network traceroute</em>';
+                        break;
+                    default:
+                        displayContent = '<em class="text-gray-500">No content</em>';
+                }
+            }
+            
+            return `
+            <div class="border-l-4 border-${typeColor}-500 pl-4 py-2">
                 <div class="flex justify-between items-start">
-                    <div>
-                        <p class="font-semibold">${msg.sender_name || msg.sender_id}</p>
-                        <p class="text-gray-600 text-sm">${msg.content}</p>
+                    <div class="flex-1">
+                        <div class="flex items-center gap-2 mb-1">
+                            <span class="text-lg">${typeIcon}</span>
+                            <span class="text-xs font-semibold text-${typeColor}-600 uppercase">${typeLabel}</span>
+                            <span class="text-sm font-semibold text-gray-700">${this.escapeHtml(msg.sender_name || msg.sender_id)}</span>
+                        </div>
+                        <p class="text-gray-600 text-sm">${displayContent}</p>
                     </div>
-                    <span class="text-xs text-gray-500">${this.formatTimestamp(msg.timestamp)}</span>
+                    <span class="text-xs text-gray-500 ml-2">${this.formatTimestamp(msg.timestamp)}</span>
                 </div>
             </div>
-        `).join('');
+            `;
+        }).join('');
     }
     
     async sendBroadcast() {
@@ -394,13 +567,18 @@ class ZephyrGateDashboard {
     handleWebSocketMessage(data) {
         switch (data.type) {
             case 'system_event':
-                this.addSystemEvent(data);
+                // Add new event to the top of the list
+                if (data.data) {
+                    this.addSystemEvent(data.data);
+                }
                 break;
             case 'broadcast_sent':
                 this.addSystemEvent({
                     type: 'broadcast',
                     message: `Broadcast sent by ${data.sender}: ${data.content}`,
-                    timestamp: data.timestamp
+                    timestamp: data.timestamp,
+                    severity: 'info',
+                    source: 'broadcast'
                 });
                 break;
             default:
@@ -412,22 +590,53 @@ class ZephyrGateDashboard {
         const container = document.getElementById('system-events');
         if (!container) return;
         
+        // Get icon and color based on event type and severity
+        let icon = 'ℹ️';
+        let borderColor = 'blue';
+        
+        switch(event.severity) {
+            case 'success':
+                icon = '✓';
+                borderColor = 'green';
+                break;
+            case 'warning':
+                icon = '⚠️';
+                borderColor = 'yellow';
+                break;
+            case 'error':
+                icon = '✗';
+                borderColor = 'red';
+                break;
+            default:
+                icon = 'ℹ️';
+                borderColor = 'blue';
+        }
+        
+        // Format event type for display
+        const typeLabel = (event.type || 'System Event').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+        
         const eventDiv = document.createElement('div');
-        eventDiv.className = 'border-l-4 border-green-500 pl-4 py-2';
+        eventDiv.className = `border-l-4 border-${borderColor}-500 pl-4 py-2`;
         eventDiv.innerHTML = `
             <div class="flex justify-between items-start">
-                <div>
-                    <p class="font-semibold">${event.type || 'System Event'}</p>
-                    <p class="text-gray-600 text-sm">${event.message || JSON.stringify(event.data)}</p>
+                <div class="flex-1">
+                    <div class="flex items-center gap-2 mb-1">
+                        <span class="text-lg">${icon}</span>
+                        <span class="text-xs font-semibold text-${borderColor}-600 uppercase">${typeLabel}</span>
+                        <span class="text-xs text-gray-500">${event.source || 'system'}</span>
+                    </div>
+                    <p class="text-gray-600 text-sm">${this.escapeHtml(event.message || JSON.stringify(event.data))}</p>
                 </div>
-                <span class="text-xs text-gray-500">${this.formatTimestamp(event.timestamp)}</span>
+                <span class="text-xs text-gray-500 ml-2">${this.formatTimestamp(event.timestamp)}</span>
             </div>
         `;
         
-        // Add to top of events list
+        // Remove "no events" message if present
         if (container.firstChild && container.firstChild.textContent.includes('No recent events')) {
             container.innerHTML = '';
         }
+        
+        // Add to top of events list
         container.insertBefore(eventDiv, container.firstChild);
         
         // Keep only last 10 events
@@ -504,10 +713,13 @@ class ZephyrGateDashboard {
             case 'messages':
                 // Load message history
                 try {
-                    const response = await this.apiRequest('/api/system/messages?limit=50');
+                    const response = await this.apiRequest('/api/messages/recent?limit=50');
                     if (response.ok) {
                         const messages = await response.json();
+                        console.log('Loaded messages:', messages.length, messages);
                         this.updateMessagesList(messages);
+                    } else {
+                        console.error('Failed to load messages, status:', response.status);
                     }
                 } catch (error) {
                     console.error('Failed to load messages:', error);
@@ -528,9 +740,14 @@ class ZephyrGateDashboard {
     
     updateMessagesList(messages) {
         const container = document.getElementById('messages-list');
-        if (!container) return;
+        if (!container) {
+            console.error('messages-list container not found');
+            return;
+        }
         
-        if (messages.length === 0) {
+        console.log('updateMessagesList called with:', messages);
+        
+        if (!messages || messages.length === 0) {
             container.innerHTML = '<p class="text-gray-500 text-center py-4">No messages found</p>';
             return;
         }
@@ -539,15 +756,15 @@ class ZephyrGateDashboard {
             <div class="border border-gray-200 rounded-lg p-4">
                 <div class="flex justify-between items-start mb-2">
                     <div>
-                        <span class="font-semibold">${msg.sender_name || msg.sender_id}</span>
-                        ${msg.recipient_id ? `<span class="text-gray-500">→ ${msg.recipient_id}</span>` : ''}
+                        <span class="font-semibold">${this.escapeHtml(msg.sender_name || msg.sender_id)}</span>
+                        ${msg.recipient_id ? `<span class="text-gray-500">→ ${this.escapeHtml(msg.recipient_id)}</span>` : ''}
                         <span class="text-xs text-gray-500 ml-2">Channel ${msg.channel}</span>
                     </div>
                     <span class="text-xs text-gray-500">${this.formatTimestamp(msg.timestamp)}</span>
                 </div>
-                <p class="text-gray-700">${msg.content}</p>
+                <p class="text-gray-700">${this.escapeHtml(msg.content || '')}</p>
                 <div class="text-xs text-gray-500 mt-2">
-                    Type: ${msg.message_type} | Interface: ${msg.interface_id}
+                    Type: ${this.escapeHtml(msg.message_type)} | Interface: ${this.escapeHtml(msg.interface_id)}
                 </div>
             </div>
         `).join('');
@@ -604,6 +821,13 @@ class ZephyrGateDashboard {
                     this.displaySystemMetrics(metrics[0]);
                 }
             }
+            
+            // Load plugin status
+            const pluginsResponse = await this.apiRequest('/api/plugins');
+            if (pluginsResponse.ok) {
+                const plugins = await pluginsResponse.json();
+                this.displayPluginStatus(plugins);
+            }
         } catch (error) {
             console.error('Error loading system status:', error);
             document.getElementById('service-status').innerHTML = 
@@ -634,6 +858,34 @@ class ZephyrGateDashboard {
                 diskEl.textContent = `${metrics.disk_percent.toFixed(1)}%`;
                 diskEl.className = metrics.disk_percent > 90 ? 'text-2xl font-bold text-red-600' : 'text-2xl font-bold';
             }
+        }
+    }
+    
+    displayPluginStatus(plugins) {
+        const pluginEl = document.getElementById('plugin-status');
+        if (!pluginEl) return;
+        
+        if (!plugins || plugins.length === 0) {
+            pluginEl.textContent = '0/0';
+            return;
+        }
+        
+        // Count running plugins (status === 'running' and no errors)
+        const runningPlugins = plugins.filter(p => 
+            p.status === 'running' && 
+            !(p.status === 'error' || p.error)
+        ).length;
+        const totalPlugins = plugins.length;
+        
+        pluginEl.textContent = `${runningPlugins}/${totalPlugins}`;
+        
+        // Color code based on health
+        if (runningPlugins === totalPlugins) {
+            pluginEl.className = 'text-2xl font-bold text-green-600';
+        } else if (runningPlugins >= totalPlugins * 0.8) {
+            pluginEl.className = 'text-2xl font-bold text-yellow-600';
+        } else {
+            pluginEl.className = 'text-2xl font-bold text-red-600';
         }
     }
     
@@ -1807,6 +2059,187 @@ class ZephyrGateDashboard {
             console.error('Error deleting user:', error);
             this.showNotification(`Error: ${error.message}`, 'error');
         }
+    }
+    
+    updateTracerouteHistory(history) {
+        const tbody = document.getElementById('traceroute-history-tbody');
+        if (!tbody) return;
+        
+        if (history.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="px-4 py-8 text-center text-gray-500">No traceroute history</td></tr>';
+            return;
+        }
+        
+        tbody.innerHTML = history.map(item => {
+            const timestamp = new Date(item.timestamp).toLocaleString();
+            const statusIcon = item.success ? '✓' : '✗';
+            const statusClass = item.success ? 'text-green-600' : 'text-red-600';
+            const displayName = item.short_name && item.long_name ? 
+                `${item.short_name} - ${item.long_name}` : 
+                (item.short_name || item.long_name || 'Unknown');
+            
+            return `
+            <tr class="border-b hover:bg-gray-50">
+                <td class="px-4 py-2 font-mono text-sm">${item.node_id}</td>
+                <td class="px-4 py-2">${displayName}</td>
+                <td class="px-4 py-2">${timestamp}</td>
+                <td class="px-4 py-2 text-center ${statusClass} font-bold">${statusIcon}</td>
+                <td class="px-4 py-2 text-center">${item.hop_count || 'N/A'}</td>
+            </tr>
+            `;
+        }).join('');
+    }
+    
+    updateUpcomingTraceroutes(upcoming) {
+        const tbody = document.getElementById('upcoming-traceroutes-tbody');
+        if (!tbody) return;
+        
+        if (upcoming.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="px-4 py-8 text-center text-gray-500">No upcoming traceroutes scheduled.<br><span class="text-sm">Nodes with 0 hops (direct connections) are not scheduled when skip_direct_nodes is enabled.</span></td></tr>';
+            return;
+        }
+        
+        tbody.innerHTML = upcoming.map(item => {
+            const displayName = item.short_name && item.long_name ? 
+                `${item.short_name} - ${item.long_name}` : 
+                (item.short_name || item.long_name || 'Unknown');
+            
+            // Determine status display
+            let statusBadge, timeUntil, actionButton = '';
+            
+            if (item.in_queue) {
+                // Node is in queue
+                statusBadge = '<span class="px-2 py-1 text-xs font-semibold rounded bg-blue-100 text-blue-800">Queued</span>';
+                timeUntil = '<span class="text-blue-600">In Queue</span>';
+            } else if (item.status === 'pending' || item.status === 'pending_schedule' || item.scheduled_time === null) {
+                // Node needs to be scheduled
+                statusBadge = '<span class="px-2 py-1 text-xs font-semibold rounded bg-orange-100 text-orange-800">Pending</span>';
+                timeUntil = '<span class="text-orange-600">Not Scheduled</span>';
+                actionButton = `<button onclick="dashboard.queueTracerouteNow('${item.node_id}')" class="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600">Queue Now</button>`;
+            } else if (item.is_overdue) {
+                // Node is overdue
+                statusBadge = '<span class="px-2 py-1 text-xs font-semibold rounded bg-red-100 text-red-800">Overdue</span>';
+                timeUntil = '<span class="text-red-600 font-semibold">Overdue</span>';
+                actionButton = `<button onclick="dashboard.queueTracerouteNow('${item.node_id}')" class="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600">Queue Now</button>`;
+            } else {
+                // Node is scheduled
+                statusBadge = '<span class="px-2 py-1 text-xs font-semibold rounded bg-green-100 text-green-800">Scheduled</span>';
+                if (item.minutes_until < 60) {
+                    timeUntil = `${item.minutes_until}m`;
+                } else {
+                    const hours = Math.floor(item.minutes_until / 60);
+                    const mins = item.minutes_until % 60;
+                    timeUntil = `${hours}h ${mins}m`;
+                }
+            }
+            
+            const scheduledTime = item.scheduled_time ? new Date(item.scheduled_time).toLocaleString() : '<span class="text-gray-500 italic">-</span>';
+            const statusIcon = item.last_success === null ? '-' : (item.last_success ? '✓' : '✗');
+            const statusClass = item.last_success === null ? 'text-gray-400' : (item.last_success ? 'text-green-600' : 'text-red-600');
+            
+            return `
+            <tr class="border-b hover:bg-gray-50">
+                <td class="px-4 py-2 font-mono text-sm">${item.node_id}</td>
+                <td class="px-4 py-2">${displayName}</td>
+                <td class="px-4 py-2">${statusBadge}</td>
+                <td class="px-4 py-2">${timeUntil}</td>
+                <td class="px-4 py-2 text-center ${statusClass}">${statusIcon}</td>
+                <td class="px-4 py-2 text-center">${actionButton}</td>
+            </tr>
+            `;
+        }).join('');
+    }
+    
+    async queueTracerouteNow(nodeId) {
+        try {
+            console.log(`Queueing traceroute for ${nodeId}`);
+            const response = await this.apiRequest(`/api/traceroute/queue/${nodeId}`, {
+                method: 'POST'
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                console.log('Queue result:', result);
+                
+                // Show success message
+                this.showNotification(result.message || 'Traceroute queued successfully', 'success');
+                
+                // Refresh the upcoming traceroutes list
+                await this.loadTracerouteData();
+            } else {
+                const error = await response.json();
+                this.showNotification(error.error || 'Failed to queue traceroute', 'error');
+            }
+        } catch (error) {
+            console.error('Error queueing traceroute:', error);
+            this.showNotification('Error queueing traceroute', 'error');
+        }
+    }
+    
+    showNotification(message, type = 'info') {
+        // Simple notification - you can enhance this with a proper notification system
+        const color = type === 'success' ? 'green' : type === 'error' ? 'red' : 'blue';
+        const notification = document.createElement('div');
+        notification.className = `fixed top-4 right-4 px-6 py-3 bg-${color}-500 text-white rounded shadow-lg z-50`;
+        notification.textContent = message;
+        document.body.appendChild(notification);
+        
+        setTimeout(() => {
+            notification.remove();
+        }, 3000);
+    }
+    
+    updateSystemEvents(events) {
+        const container = document.getElementById('system-events');
+        if (!container) return;
+        
+        if (!events || events.length === 0) {
+            container.innerHTML = '<p class="text-gray-500 text-center py-4">No recent events</p>';
+            return;
+        }
+        
+        container.innerHTML = events.map(event => {
+            // Get icon and color based on event type and severity
+            let icon = 'ℹ️';
+            let borderColor = 'blue';
+            
+            switch(event.severity) {
+                case 'success':
+                    icon = '✓';
+                    borderColor = 'green';
+                    break;
+                case 'warning':
+                    icon = '⚠️';
+                    borderColor = 'yellow';
+                    break;
+                case 'error':
+                    icon = '✗';
+                    borderColor = 'red';
+                    break;
+                default:
+                    icon = 'ℹ️';
+                    borderColor = 'blue';
+            }
+            
+            // Format event type for display
+            const typeLabel = event.type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+            
+            return `
+            <div class="border-l-4 border-${borderColor}-500 pl-4 py-2">
+                <div class="flex justify-between items-start">
+                    <div class="flex-1">
+                        <div class="flex items-center gap-2 mb-1">
+                            <span class="text-lg">${icon}</span>
+                            <span class="text-xs font-semibold text-${borderColor}-600 uppercase">${typeLabel}</span>
+                            <span class="text-xs text-gray-500">${event.source || 'system'}</span>
+                        </div>
+                        <p class="text-gray-600 text-sm">${this.escapeHtml(event.message)}</p>
+                    </div>
+                    <span class="text-xs text-gray-500 ml-2">${this.formatTimestamp(event.timestamp)}</span>
+                </div>
+            </div>
+            `;
+        }).join('');
     }
 }
 

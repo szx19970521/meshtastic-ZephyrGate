@@ -797,7 +797,7 @@ traceroute_mapper:
   traceroutes_per_minute: 1  # Rate limit
   max_hops: 7  # Maximum trace depth
   recheck_interval_hours: 6  # Periodic updates
-  skip_direct_nodes: true  # Skip 1-hop neighbors
+  skip_direct_nodes: true  # Skip 0-hop neighbors (direct connections)
   forward_to_mqtt: true  # Send to MQTT
 ```
 

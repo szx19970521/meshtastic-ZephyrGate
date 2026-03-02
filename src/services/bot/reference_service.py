@@ -389,14 +389,12 @@ class ReferenceService:
         try:
             from core.database import get_database
             db = get_database()
-            cursor = db.cursor()
-            cursor.execute("""
+            rows = db.execute_query("""
                 SELECT location_lat, location_lon FROM users WHERE node_id = ?
             """, (user_id,))
-            result = cursor.fetchone()
             
-            if result and result[0] is not None and result[1] is not None:
-                return LocationData(latitude=result[0], longitude=result[1])
+            if rows and rows[0][0] is not None and rows[0][1] is not None:
+                return LocationData(latitude=rows[0][0], longitude=rows[0][1])
             
         except Exception as e:
             self.logger.error(f"Error getting user location: {e}")

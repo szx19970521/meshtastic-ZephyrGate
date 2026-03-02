@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Dict, Any
-from src.models.message import Message, MessagePriority
+from models.message import Message, MessagePriority
 
 
 @dataclass

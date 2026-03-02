@@ -6,7 +6,7 @@ traceroutes to nodes. Prioritizes important network changes, respects network
 health constraints, and publishes results to MQTT for visualization by mapping tools.
 
 Author: ZephyrGate Team
-Version: 1.0.0
+Version: 1.2.0
 License: GPL-3.0
 """
 
@@ -28,12 +28,12 @@ from core.plugin_manager import PluginMetadata
 from models.message import Message, MessageType
 
 # Import component modules
-from plugins.traceroute_mapper.node_state_tracker import NodeStateTracker
-from plugins.traceroute_mapper.priority_queue import PriorityQueue
-from plugins.traceroute_mapper.rate_limiter import RateLimiter
-from plugins.traceroute_mapper.traceroute_manager import TracerouteManager
-from plugins.traceroute_mapper.state_persistence import StatePersistence
-from plugins.traceroute_mapper.network_health_monitor import NetworkHealthMonitor
+from .node_state_tracker import NodeStateTracker
+from .priority_queue import PriorityQueue
+from .rate_limiter import RateLimiter
+from .traceroute_manager import TracerouteManager
+from .state_persistence import StatePersistence
+from .network_health_monitor import NetworkHealthMonitor
 
 
 class TracerouteMapperPlugin(EnhancedPlugin):
@@ -212,9 +212,14 @@ class TracerouteMapperPlugin(EnhancedPlugin):
             
             # Extract and validate each configuration parameter
             config_params = {
-                # Rate limiting
-                'traceroutes_per_minute': ('number', 1, 0, 60),
+                # Rate limiting - support both old and new parameter names
+                'seconds_between_traceroutes': ('number', 120, 1, 3600),  # 1 second to 1 hour
                 'burst_multiplier': ('number', 2, 1, 10),
+                
+                # Traceroute scheduling
+                'traceroute_interval_minutes': ('number', 180, 10, 10080),  # 10 minutes to 1 week
+                'traceroute_retry_minutes': ('number', 30, 5, 1440),  # 5 minutes to 1 day
+                'active_node_hours': ('number', 24, 1, 168),  # 1 hour to 1 week
                 
                 # Queue management
                 'queue_max_size': ('integer', 500, 10, 10000),
@@ -222,7 +227,7 @@ class TracerouteMapperPlugin(EnhancedPlugin):
                                            ['drop_lowest_priority', 'drop_oldest', 'drop_new'], None),
                 'clear_queue_on_startup': ('boolean', False, None, None),
                 
-                # Periodic rechecks
+                # Periodic rechecks (deprecated - use traceroute_interval_minutes)
                 'recheck_interval_hours': ('number', 6, 0, 168),
                 'recheck_enabled': ('boolean', True, None, None),
                 
@@ -429,8 +434,18 @@ class TracerouteMapperPlugin(EnhancedPlugin):
             
             self._config_cache['emergency_stop'] = emergency_config
             
+            # Convert seconds_between_traceroutes to traceroutes_per_minute for rate limiter
+            seconds_between = self._config_cache['seconds_between_traceroutes']
+            traceroutes_per_minute = 60.0 / seconds_between
+            self._config_cache['traceroutes_per_minute'] = traceroutes_per_minute
+            
+            self.logger.info(
+                f"Rate limit: {seconds_between} seconds between traceroutes "
+                f"= {traceroutes_per_minute:.2f} traceroutes/minute"
+            )
+            
             # Special validation: rate limit of 0 disables operations
-            if self._config_cache['traceroutes_per_minute'] == 0:
+            if traceroutes_per_minute == 0:
                 self.logger.warning("traceroutes_per_minute is 0, all traceroute operations will be disabled")
             
             # Special validation: recheck interval of 0 disables periodic rechecks
@@ -455,8 +470,9 @@ class TracerouteMapperPlugin(EnhancedPlugin):
         
         This method:
         1. Loads persisted state (if enabled)
-        2. Starts background tasks (queue processing, periodic rechecks, state persistence)
-        3. Runs initial discovery scan (if enabled)
+        2. Subscribes to traceroute response pubsub topic
+        3. Starts background tasks (queue processing, periodic rechecks, state persistence)
+        4. Runs initial discovery scan (if enabled)
         
         Returns:
             True if start successful, False otherwise
@@ -483,6 +499,14 @@ class TracerouteMapperPlugin(EnhancedPlugin):
                 except Exception as e:
                     self.logger.error(f"Failed to load persisted state: {e}", exc_info=True)
                     self.logger.info("Continuing with empty state")
+            
+            # Subscribe to traceroute responses via pubsub
+            try:
+                from pubsub import pub
+                pub.subscribe(self._on_traceroute_response, "meshtastic.receive.traceroute")
+                self.logger.info("Subscribed to meshtastic.receive.traceroute pubsub topic")
+            except Exception as e:
+                self.logger.warning(f"Failed to subscribe to traceroute pubsub topic: {e}")
             
             # Clear queue on startup if configured
             if self._config_cache.get('clear_queue_on_startup', False):
@@ -519,6 +543,9 @@ class TracerouteMapperPlugin(EnhancedPlugin):
                 self.logger.info("Running initial discovery scan...")
                 asyncio.create_task(self._run_initial_discovery())
             
+            # Mark plugin as running
+            self.is_running = True
+            
             self.logger.info("Network Traceroute Mapper plugin started successfully")
             return True
             
@@ -531,10 +558,11 @@ class TracerouteMapperPlugin(EnhancedPlugin):
         Stop the plugin.
         
         This method:
-        1. Stops background tasks
-        2. Saves final state to disk
-        3. Clears queue (if configured)
-        4. Cleans up resources
+        1. Unsubscribes from pubsub topics
+        2. Stops background tasks
+        3. Saves final state to disk
+        4. Clears queue (if configured)
+        5. Cleans up resources
         
         Returns:
             True if stop successful, False otherwise
@@ -543,7 +571,18 @@ class TracerouteMapperPlugin(EnhancedPlugin):
         """
         self.logger.info("Stopping Network Traceroute Mapper plugin")
         
+        # Mark plugin as not running
+        self.is_running = False
+        
         try:
+            # Unsubscribe from pubsub
+            try:
+                from pubsub import pub
+                pub.unsubscribe(self._on_traceroute_response, "meshtastic.receive.traceroute")
+                self.logger.info("Unsubscribed from traceroute pubsub topic")
+            except Exception as e:
+                self.logger.warning(f"Failed to unsubscribe from pubsub: {e}")
+            
             # Stop background tasks
             self.logger.info("Stopping background tasks...")
             for task in self._background_tasks:
@@ -578,7 +617,7 @@ class TracerouteMapperPlugin(EnhancedPlugin):
             self.logger.error(f"Failed to stop Network Traceroute Mapper plugin: {e}", exc_info=True)
             return False
     
-    async def handle_message(self, message: Message, context: Dict[str, Any]) -> Optional[Any]:
+    async def handle_message(self, message: Message, user: Optional[Any] = None) -> Optional[Any]:
         """
         Handle incoming message from mesh.
         
@@ -587,7 +626,7 @@ class TracerouteMapperPlugin(EnhancedPlugin):
         
         Args:
             message: The incoming message
-            context: Message context
+            user: Optional user profile (not used by this plugin)
             
         Returns:
             None (messages are forwarded to other plugins)
@@ -598,6 +637,11 @@ class TracerouteMapperPlugin(EnhancedPlugin):
             return None
         
         try:
+            # Create context dict for internal use
+            context = {
+                'timestamp': datetime.now(),
+                'plugin_name': self.name
+            }
             # Delegate to the actual message handler
             return await self._handle_mesh_message(message, context)
             
@@ -740,30 +784,147 @@ class TracerouteMapperPlugin(EnhancedPlugin):
         """
         Background task to schedule periodic rechecks for nodes.
         
-        This loop checks for nodes that need rechecking based on their
-        next_recheck timestamp and queues them with appropriate priority.
+        This loop checks the database for nodes that are past due for traceroute
+        and queues them with appropriate priority.
         """
         self.logger.info("Periodic recheck loop started")
         
-        recheck_interval_hours = self._config_cache.get('recheck_interval_hours', 6)
-        check_interval_seconds = 300  # Check every 5 minutes
+        check_interval_seconds = 60  # Check every 1 minute for faster queuing
         
         while True:
             try:
                 await asyncio.sleep(check_interval_seconds)
                 
-                # Get nodes needing trace
-                nodes_needing_trace = self.node_tracker.get_nodes_needing_trace()
+                # Get configuration
+                active_hours = self._config_cache.get('active_node_hours', 24)
+                skip_direct = self._config_cache.get('skip_direct_nodes', True)
                 
-                # Queue recheck requests
-                for node_id in nodes_needing_trace:
-                    if not self.priority_queue.contains(node_id):
-                        self.priority_queue.enqueue(
+                # Get nodes from database that need traceroute
+                try:
+                    from core.database import get_database
+                    db = get_database()
+                    
+                    # Find nodes that are:
+                    # - Active (seen recently)
+                    # - Past due for traceroute
+                    # - Not already in queue
+                    query = """
+                        SELECT node_id, hop_count, snr, last_traceroute_success, next_traceroute_time
+                        FROM users 
+                        WHERE last_seen > datetime('now', '-{} hours')
+                        AND (next_traceroute_time IS NULL OR next_traceroute_time <= datetime('now'))
+                    """.format(active_hours)
+                    
+                    rows = db.execute_query(query)
+                    
+                    queued_count = 0
+                    skipped_in_queue = 0
+                    skipped_direct = 0
+                    skipped_should_not_trace = 0
+                    
+                    for row in rows:
+                        node_id = row[0]
+                        hop_count = row[1]
+                        snr = row[2]
+                        last_success = row[3]
+                        next_time = row[4]
+                        
+                        # Skip if already in queue
+                        if self.priority_queue.contains(node_id):
+                            skipped_in_queue += 1
+                            self.logger.debug(f"Skipping {node_id} - already in queue")
+                            continue
+                        
+                        # Check node_tracker for current state (more accurate than database)
+                        node_state = self.node_tracker.get_node_state(node_id)
+                        
+                        # Determine if node is direct using both database and tracker
+                        is_direct = False
+                        
+                        # First check tracker (most accurate, real-time)
+                        if node_state and node_state.is_direct:
+                            is_direct = True
+                        # Fall back to database values if no tracker state
+                        else:
+                            # Check hop_count first (most reliable indicator)
+                            if hop_count is not None and hop_count < 1:
+                                is_direct = True
+                            # For nodes with successful traceroutes, also check SNR
+                            elif last_success is True and snr is not None and snr > 5.0:
+                                is_direct = True
+                        
+                        # Skip direct nodes if configured
+                        # BUT: Never skip nodes that have failed traceroutes - we need to retry them
+                        if is_direct and skip_direct and last_success is not False:
+                            skipped_direct += 1
+                            self.logger.debug(f"Skipping direct node {node_id} in periodic recheck")
+                            continue
+                        
+                        # Ensure node is in tracker before checking if it should be traced
+                        # This is important for nodes that haven't sent messages recently
+                        if not node_state:
+                            self.node_tracker.update_node(
+                                node_id=node_id,
+                                is_direct=is_direct,
+                                snr=snr,
+                                rssi=None,
+                                hop_count=hop_count
+                            )
+                        
+                        # Check if node should be traced (filters, blacklist, etc.)
+                        if not self.node_tracker.should_trace_node(node_id):
+                            skipped_should_not_trace += 1
+                            self.logger.debug(f"Skipping {node_id} - should_trace_node returned False")
+                            continue
+                        
+                        # Determine priority
+                        if last_success is False:
+                            priority = 5  # RETRY priority
+                            reason = "retry_failed"
+                        else:
+                            priority = 8  # PERIODIC_RECHECK priority
+                            reason = "periodic_recheck"
+                        
+                        # Queue the traceroute
+                        if self.priority_queue.enqueue(
                             node_id=node_id,
-                            priority=8,  # PERIODIC_RECHECK priority
-                            reason="periodic_recheck"
+                            priority=priority,
+                            reason=reason
+                        ):
+                            queued_count += 1
+                            self.logger.debug(
+                                f"Queued periodic recheck for node {node_id}: "
+                                f"hop_count={hop_count}, snr={snr}, is_direct={is_direct}, "
+                                f"priority={priority}, reason={reason}"
+                            )
+                            
+                            # Set next_traceroute_time to now if it's NULL
+                            # This prevents nodes from showing as "pending" in the dashboard
+                            if next_time is None:  # next_traceroute_time is NULL
+                                try:
+                                    db.execute_update("""
+                                        UPDATE users 
+                                        SET next_traceroute_time = datetime('now')
+                                        WHERE node_id = ?
+                                    """, (node_id,))
+                                except Exception as e:
+                                    self.logger.error(f"Error setting next_traceroute_time for {node_id}: {e}")
+                    
+                    if queued_count > 0:
+                        self.logger.info(
+                            f"Periodic recheck: queued {queued_count} nodes "
+                            f"(skipped: {skipped_in_queue} in queue, {skipped_direct} direct, "
+                            f"{skipped_should_not_trace} filtered)"
                         )
-                        self.logger.debug(f"Queued periodic recheck for node {node_id}")
+                    else:
+                        self.logger.debug(
+                            f"Periodic recheck: no nodes queued from {len(rows)} candidates "
+                            f"(skipped: {skipped_in_queue} in queue, {skipped_direct} direct, "
+                            f"{skipped_should_not_trace} filtered)"
+                        )
+                        
+                except Exception as e:
+                    self.logger.error(f"Error in periodic recheck database query: {e}", exc_info=True)
                 
             except asyncio.CancelledError:
                 self.logger.info("Periodic recheck loop cancelled")
@@ -829,6 +990,9 @@ class TracerouteMapperPlugin(EnhancedPlugin):
                     # Mark node as traced (failed)
                     self.node_tracker.mark_node_traced(pending.node_id, success=False)
                     
+                    # Update database schedule for retry
+                    await self._update_traceroute_schedule(pending.node_id, success=False)
+                    
                     # Schedule retry if retries remain
                     if pending.retry_count < pending.max_retries:
                         await self.traceroute_manager.schedule_retry(pending)
@@ -848,29 +1012,105 @@ class TracerouteMapperPlugin(EnhancedPlugin):
     
     async def _run_initial_discovery(self) -> None:
         """
-        Run initial discovery scan for all known indirect nodes.
+        Run initial discovery scan for nodes that are due for traceroute.
+        Only queues nodes that:
+        - Are active (seen recently)
+        - Are indirect (not direct connection)
+        - Are past due for traceroute (next_traceroute_time is in the past or NULL)
         """
         try:
             self.logger.info("Running initial discovery scan...")
             
-            # Get all indirect nodes
-            indirect_nodes = self.node_tracker.get_indirect_nodes()
+            # Get configuration
+            active_hours = self._config_cache.get('active_node_hours', 24)
+            skip_direct = self._config_cache.get('skip_direct_nodes', True)
             
-            # Queue traceroutes for all indirect nodes
-            queued_count = 0
-            for node_id in indirect_nodes:
-                if self.node_tracker.should_trace_node(node_id):
+            # Get nodes from database that need traceroute
+            try:
+                from core.database import get_database
+                db = get_database()
+                
+                # Build query to find nodes needing traceroute
+                query = """
+                    SELECT node_id, hop_count, snr, last_seen, 
+                           next_traceroute_time, last_traceroute_success
+                    FROM users 
+                    WHERE last_seen > datetime('now', '-{} hours')
+                    AND (next_traceroute_time IS NULL OR next_traceroute_time <= datetime('now'))
+                """.format(active_hours)
+                
+                rows = db.execute_query(query)
+                
+                self.logger.info(f"Found {len(rows)} nodes due for traceroute from last {active_hours} hours")
+                
+                # Process each node
+                queued_count = 0
+                skipped_direct = 0
+                skipped_filtered = 0
+                
+                for row in rows:
+                    node_id = row[0]
+                    hop_count = row[1]
+                    snr = row[2]
+                    last_seen = row[3]
+                    next_traceroute_time = row[4]
+                    last_success = row[5]
+                    
+                    # Determine if node is direct based on hop count and SNR (0 hops = direct)
+                    is_direct = False
+                    if hop_count is not None and hop_count < 1:
+                        is_direct = True
+                    elif snr is not None and snr > 5.0:
+                        is_direct = True
+                    
+                    # Skip direct nodes if configured
+                    if is_direct and skip_direct:
+                        skipped_direct += 1
+                        continue
+                    
+                    # Update node tracker
+                    self.node_tracker.update_node(
+                        node_id=node_id,
+                        is_direct=is_direct,
+                        snr=snr,
+                        rssi=None,
+                        hop_count=hop_count
+                    )
+                    
+                    # Check if node should be traced (filters, blacklist, etc.)
+                    if not self.node_tracker.should_trace_node(node_id):
+                        skipped_filtered += 1
+                        continue
+                    
+                    # Determine priority based on status
+                    priority = 1  # NEW_NODE priority (highest)
+                    reason = "initial_discovery"
+                    
+                    if next_traceroute_time is not None:
+                        # Node has been traced before
+                        if last_success is False:
+                            priority = 5  # RETRY priority
+                            reason = "retry_failed"
+                        else:
+                            priority = 8  # PERIODIC_RECHECK priority
+                            reason = "periodic_recheck"
+                    
+                    # Queue traceroute for indirect nodes
                     if self.priority_queue.enqueue(
                         node_id=node_id,
-                        priority=1,  # NEW_NODE priority
-                        reason="initial_discovery"
+                        priority=priority,
+                        reason=reason
                     ):
                         queued_count += 1
-            
-            self.logger.info(
-                f"Initial discovery scan complete: queued {queued_count} nodes "
-                f"out of {len(indirect_nodes)} indirect nodes"
-            )
+                
+                self.logger.info(
+                    f"Initial discovery complete: queued {queued_count} nodes "
+                    f"(skipped {skipped_direct} direct, {skipped_filtered} filtered)"
+                )
+                
+            except Exception as e:
+                self.logger.error(f"Error loading nodes from database: {e}", exc_info=True)
+                self.logger.info("Initial discovery failed")
             
         except Exception as e:
             self.logger.error(f"Error in initial discovery scan: {e}", exc_info=True)
@@ -883,95 +1123,92 @@ class TracerouteMapperPlugin(EnhancedPlugin):
             True if we should process, False otherwise
         """
         # Check if rate is zero (disabled)
-        if self._config_cache.get('traceroutes_per_minute', 1) == 0:
-            self.logger.debug("Queue processing disabled: rate limit is 0")
+        rate = self._config_cache.get('traceroutes_per_minute', 1)
+        if rate == 0:
+            self.logger.warning("Queue processing disabled: rate limit is 0")
             return False
         
         # Check for emergency stop
         if self.health_monitor.is_emergency_stop:
-            self.logger.debug("Queue processing paused: emergency stop active")
+            self.logger.warning(
+                f"Queue processing paused: emergency stop active - "
+                f"reason={self.health_monitor.emergency_stop_reason}"
+            )
             return False
         
         # Check for quiet hours
         if self.health_monitor.is_quiet_hours():
-            self.logger.debug("Queue processing paused: quiet hours active")
+            self.logger.info("Queue processing paused: quiet hours active")
             return False
         
         # Check network health
         if not self.health_monitor.is_healthy():
-            self.logger.debug("Queue processing paused: network unhealthy")
+            success_rate = self.health_monitor.get_success_rate()
+            self.logger.warning(
+                f"Queue processing paused: network unhealthy - "
+                f"success_rate={success_rate:.2%}, "
+                f"threshold={self.health_monitor.failure_threshold:.2%}, "
+                f"emergency_stop={self.health_monitor.is_emergency_stop}"
+            )
             return False
         
+        self.logger.debug(
+            f"Queue processing active: rate={rate}/min, "
+            f"queue_size={self.priority_queue.size()}, "
+            f"success_rate={self.health_monitor.get_success_rate():.2%}"
+        )
         return True
     
     async def _send_traceroute_request(self, request) -> None:
         """
-        Send a traceroute request.
+        Send a traceroute request using the native meshtastic library method.
         
         Args:
             request: TracerouteRequest object from the queue
             
         Requirements:
-            - 7.1: Forward traceroute request to message router
-            - 7.3: Use standard Meshtastic message format
-            - 14.1: Forward all traceroute messages for MQTT publishing
+            - 7.1: Use native meshtastic sendTraceRoute method
+            - 7.3: Proper protocol compliance via library
+            - 14.1: Responses handled via pubsub subscription
         """
         try:
-            # Send traceroute via manager
+            # Get the meshtastic interface from the message router
+            meshtastic_interface = None
+            if self.plugin_manager and hasattr(self.plugin_manager, 'message_router'):
+                message_router = self.plugin_manager.message_router
+                if hasattr(message_router, 'interfaces') and message_router.interfaces:
+                    # Get the first available interface
+                    interface_id = list(message_router.interfaces.keys())[0]
+                    interface_wrapper = message_router.interfaces[interface_id]
+                    
+                    # Get the actual meshtastic connection object
+                    if hasattr(interface_wrapper, 'connection'):
+                        meshtastic_interface = interface_wrapper.connection
+                        self.logger.debug(f"Got meshtastic interface connection from {interface_id}")
+            
+            if not meshtastic_interface:
+                self.logger.error("No meshtastic interface available for traceroute")
+                self.health_monitor.record_failure()
+                self.stats['traceroutes_failed'] += 1
+                return
+            
+            # Send traceroute via manager with native method
             request_id = await self.traceroute_manager.send_traceroute(
                 node_id=request.node_id,
-                priority=request.priority
+                priority=request.priority,
+                meshtastic_interface=meshtastic_interface
             )
             
-            # Get the message to send
-            message = self.traceroute_manager.get_pending_traceroute_message(request_id)
+            if self._config_cache.get('log_traceroute_requests', True):
+                self.logger.info(
+                    f"Traceroute request sent to {request.node_id} "
+                    f"(request_id={request_id}, priority={request.priority}, "
+                    f"reason={request.reason})"
+                )
             
-            if message:
-                # Forward message to message router (which will send it and publish to MQTT)
-                # Requirements: 7.1, 7.3, 14.1
-                if self.plugin_manager and hasattr(self.plugin_manager, 'message_router'):
-                    try:
-                        # Send message through message router
-                        # This will:
-                        # 1. Send the traceroute request to the mesh via the Meshtastic interface
-                        # 2. Forward to MQTT Gateway plugin (if enabled) for MQTT publishing
-                        success = await self.plugin_manager.message_router.send_message(message)
-                        
-                        if success:
-                            if self._config_cache.get('log_traceroute_requests', True):
-                                self.logger.info(
-                                    f"Traceroute request sent to {request.node_id} "
-                                    f"(request_id={request_id}, priority={request.priority}, "
-                                    f"reason={request.reason})"
-                                )
-                        else:
-                            self.logger.warning(
-                                f"Failed to send traceroute request to {request.node_id} "
-                                f"(request_id={request_id})"
-                            )
-                            # Record failure
-                            self.health_monitor.record_failure()
-                            self.stats['traceroutes_failed'] += 1
-                            return
-                    except Exception as e:
-                        self.logger.error(
-                            f"Error forwarding traceroute request to message router: {e}",
-                            exc_info=True
-                        )
-                        # Record failure
-                        self.health_monitor.record_failure()
-                        self.stats['traceroutes_failed'] += 1
-                        return
-                else:
-                    self.logger.warning("Message router not available, cannot send traceroute request")
-                    # Record failure
-                    self.health_monitor.record_failure()
-                    self.stats['traceroutes_failed'] += 1
-                    return
-                
-                # Update statistics
-                self.stats['traceroutes_sent'] += 1
-                self.stats['last_traceroute_time'] = datetime.now()
+            # Update statistics
+            self.stats['traceroutes_sent'] += 1
+            self.stats['last_traceroute_time'] = datetime.now()
             
         except Exception as e:
             self.logger.error(
@@ -981,6 +1218,66 @@ class TracerouteMapperPlugin(EnhancedPlugin):
             # Record failure
             self.health_monitor.record_failure()
             self.stats['traceroutes_failed'] += 1
+    
+    def _on_traceroute_response(self, packet: dict, interface: Any):
+        """
+        Handle traceroute response from pubsub.
+        
+        This is called by the meshtastic library's pubsub system when a
+        traceroute response is received on the "meshtastic.receive.traceroute" topic.
+        
+        Args:
+            packet: The packet dictionary from meshtastic
+            interface: The meshtastic interface that received the packet
+        """
+        try:
+            self.logger.debug(f"Received traceroute response via pubsub: {packet}")
+            
+            # Convert the meshtastic packet to our Message format
+            from models.message import Message, MessageType, MessagePriority
+            
+            # Extract route data from the decoded traceroute protobuf
+            decoded = packet.get('decoded', {})
+            traceroute_data = decoded.get('traceroute', {})
+            
+            # Parse route information
+            route = traceroute_data.get('route', [])
+            route_back = traceroute_data.get('routeBack', [])
+            snr_towards = traceroute_data.get('snrTowards', [])
+            snr_back = traceroute_data.get('snrBack', [])
+            
+            # Convert SNR values from quarter-dB to dB (divide by 4)
+            snr_towards_db = [snr / 4.0 for snr in snr_towards] if snr_towards else []
+            snr_back_db = [snr / 4.0 for snr in snr_back] if snr_back else []
+            
+            # Create Message object
+            message = Message(
+                id=str(packet.get('id', '')),
+                sender_id=packet.get('fromId', ''),
+                recipient_id=packet.get('toId', ''),
+                channel=packet.get('channel', 0),
+                content="",  # Traceroute responses have no text content
+                message_type=MessageType.ROUTING,
+                priority=MessagePriority.NORMAL,
+                hop_count=len(route),
+                snr=packet.get('rxSnr'),
+                rssi=packet.get('rxRssi'),
+                metadata={
+                    'traceroute': True,
+                    'route': route,
+                    'route_back': route_back,
+                    'snr_values': snr_towards_db,
+                    'snr_back_values': snr_back_db,
+                    'raw_packet': packet
+                }
+            )
+            
+            # Schedule async handling
+            if self.is_running:
+                asyncio.create_task(self._handle_traceroute_response(message))
+            
+        except Exception as e:
+            self.logger.error(f"Error handling traceroute response from pubsub: {e}", exc_info=True)
     
     async def _handle_mesh_message(self, message: Message, context: Dict[str, Any]) -> Optional[Any]:
         """
@@ -1072,8 +1369,8 @@ class TracerouteMapperPlugin(EnhancedPlugin):
         Returns:
             True if node is direct, False otherwise
         """
-        # Check hop count (0 or 1 indicates direct)
-        if message.hop_count is not None and message.hop_count <= 1:
+        # Check hop count (0 indicates direct connection)
+        if message.hop_count is not None and message.hop_count < 1:
             return True
         
         # Check signal strength (strong signal indicates direct)
@@ -1097,18 +1394,29 @@ class TracerouteMapperPlugin(EnhancedPlugin):
             True if traceroute response, False otherwise
         """
         # Check message type
-        if message.message_type != MessageType.ROUTING:
+        if message.message_type != MessageType.ROUTING and message.message_type != MessageType.TRACEROUTE:
+            return False
+        
+        # Skip ACKs (marked explicitly as ACKs)
+        if message.metadata.get('traceroute_ack'):
+            self.logger.debug(f"Skipping traceroute ACK from {message.sender_id}")
             return False
         
         # Check for traceroute flag in metadata
         if not message.metadata.get('traceroute', False):
             return False
         
-        # Check for route array in metadata
-        if 'route' not in message.metadata:
-            return False
+        # Accept responses with route data OR direct node responses (empty route but valid)
+        route = message.metadata.get('route', [])
+        route_back = message.metadata.get('route_back', [])
+        is_direct = message.metadata.get('direct_node', False)
         
-        return True
+        # Valid if: has route data OR is marked as direct node response
+        if route or route_back or is_direct:
+            return True
+        
+        self.logger.debug(f"Skipping ROUTING message - not a valid traceroute response from {message.sender_id}")
+        return False
     
     async def _handle_traceroute_response(self, message: Message) -> None:
         """
@@ -1142,26 +1450,81 @@ class TracerouteMapperPlugin(EnhancedPlugin):
                         exc_info=True
                     )
             
-            # Check if this was one of our pending requests BEFORE forwarding to manager
+            # Check if this was one of our pending requests
+            # Match by node ID since Meshtastic responses don't include our internal request_id
             request_id = message.metadata.get('request_id')
             pending = None
+            
+            # First try to match by request_id if available
             if request_id:
                 pending = self.traceroute_manager.get_pending_traceroute(request_id)
+            
+            # If no match by request_id, try to match by node ID
+            # This handles cases where the response doesn't have our internal request_id
+            if not pending:
+                # The response is FROM a node, but we need to find which node we were TRACING
+                # Check all pending requests to see if any match this sender
+                pending = self.traceroute_manager.get_pending_for_node(message.sender_id)
+                
+                if pending:
+                    self.logger.info(
+                        f"Matched traceroute response from {message.sender_id} to pending request "
+                        f"for node {pending.node_id} (matched by node ID)"
+                    )
             
             # Forward to traceroute manager (this will remove it from pending)
             result = await self.traceroute_manager.handle_traceroute_response(message)
             
             # If this was one of our pending requests and it was successful
             if pending and result:
-                # Ensure node exists in tracker (it might not if this is a response to our request)
+                # Get the actual hop count from the traceroute result
+                actual_hop_count = result.hop_count
+                
+                # Update database with the actual hop count from traceroute
+                try:
+                    from core.database import get_database
+                    db = get_database()
+                    db.execute_update("""
+                        UPDATE users 
+                        SET hop_count = ?
+                        WHERE node_id = ?
+                    """, (actual_hop_count, pending.node_id))
+                    
+                    self.logger.debug(
+                        f"Updated database hop_count={actual_hop_count} for node {pending.node_id}"
+                    )
+                except Exception as e:
+                    self.logger.error(f"Error updating hop_count in database: {e}")
+                
+                # Determine if node is actually direct based on traceroute result
+                is_actually_direct = actual_hop_count < 1
+                
+                # Ensure node exists in tracker with correct direct status
                 if not self.node_tracker.get_node_state(pending.node_id):
-                    # Add the node to tracker as indirect (we traced it, so it's not direct)
+                    # Add the node to tracker
                     self.node_tracker.update_node(
                         node_id=pending.node_id,
-                        is_direct=False,
+                        is_direct=is_actually_direct,
                         snr=message.snr,
                         rssi=message.rssi
                     )
+                else:
+                    # Update existing node with correct direct status
+                    self.node_tracker.update_node(
+                        node_id=pending.node_id,
+                        is_direct=is_actually_direct,
+                        snr=message.snr,
+                        rssi=message.rssi
+                    )
+                
+                # If node turned out to be direct, handle the transition
+                if is_actually_direct:
+                    self.logger.info(
+                        f"Traceroute revealed {pending.node_id} is actually a direct node (0 hops)"
+                    )
+                    await self._handle_direct_node_transition(pending.node_id)
+                    # Don't schedule next traceroute for direct nodes
+                    return
                 
                 # Record success
                 self.health_monitor.record_success()
@@ -1169,6 +1532,9 @@ class TracerouteMapperPlugin(EnhancedPlugin):
                 
                 # Mark node as traced
                 self.node_tracker.mark_node_traced(pending.node_id, success=True)
+                
+                # Update database schedule for next traceroute
+                await self._update_traceroute_schedule(pending.node_id, success=True)
                 
                 # Save traceroute history
                 if self._config_cache.get('state_persistence_enabled', False):
@@ -1210,6 +1576,23 @@ class TracerouteMapperPlugin(EnhancedPlugin):
                 self.logger.debug(f"Skipping filtered node {node_id}")
                 return
             
+            # Set initial next_traceroute_time to now so it gets queued immediately
+            # This prevents the node from showing as "pending" in the dashboard
+            try:
+                from core.database import get_database
+                db = get_database()
+                now = datetime.utcnow()
+                
+                db.execute_update("""
+                    UPDATE users 
+                    SET next_traceroute_time = ?
+                    WHERE node_id = ? AND next_traceroute_time IS NULL
+                """, (now, node_id))
+                
+                self.logger.debug(f"Set initial next_traceroute_time for new node {node_id}")
+            except Exception as e:
+                self.logger.error(f"Error setting initial traceroute time for {node_id}: {e}")
+            
             # Queue traceroute with NEW_NODE priority (1 = highest)
             if self.priority_queue.enqueue(
                 node_id=node_id,
@@ -1227,6 +1610,7 @@ class TracerouteMapperPlugin(EnhancedPlugin):
     async def _handle_node_back_online(self, node_id: str) -> None:
         """
         Handle a node coming back online.
+        Only queue traceroute if node is past due.
         
         Args:
             node_id: The node ID
@@ -1237,6 +1621,36 @@ class TracerouteMapperPlugin(EnhancedPlugin):
             # Check if node should be traced
             if not self.node_tracker.should_trace_node(node_id):
                 return
+            
+            # Check if node is past due for traceroute
+            try:
+                from core.database import get_database
+                db = get_database()
+                
+                rows = db.execute_query("""
+                    SELECT next_traceroute_time 
+                    FROM users 
+                    WHERE node_id = ?
+                """, (node_id,))
+                
+                if rows and rows[0][0]:
+                    next_time_str = rows[0][0]
+                    next_time = datetime.fromisoformat(next_time_str)
+                    
+                    # Only queue if past due
+                    if next_time > datetime.utcnow():
+                        self.logger.debug(
+                            f"Node {node_id} back online but not due for traceroute until {next_time}"
+                        )
+                        # Clear the was_offline flag
+                        node_state = self.node_tracker.get_node_state(node_id)
+                        if node_state:
+                            node_state.was_offline = False
+                        return
+                
+            except Exception as e:
+                self.logger.error(f"Error checking traceroute schedule for {node_id}: {e}")
+                # Continue with queueing on error
             
             # Queue traceroute with NODE_BACK_ONLINE priority (4)
             if self.priority_queue.enqueue(
@@ -1278,6 +1692,96 @@ class TracerouteMapperPlugin(EnhancedPlugin):
         except Exception as e:
             self.logger.error(f"Error handling direct node transition {node_id}: {e}", exc_info=True)
     
+    async def _update_traceroute_schedule(self, node_id: str, success: bool) -> None:
+        """
+        Update the traceroute schedule in the database after a traceroute attempt.
+        
+        Args:
+            node_id: The node ID
+            success: Whether the traceroute was successful
+        """
+        try:
+            from core.database import get_database
+            from datetime import timedelta
+            
+            db = get_database()
+            now = datetime.utcnow()
+            
+            # Get configuration
+            if success:
+                # Schedule next traceroute based on interval
+                interval_minutes = self._config_cache.get('traceroute_interval_minutes', 180)
+                next_time = now + timedelta(minutes=interval_minutes)
+                failure_count = 0
+            else:
+                # Schedule retry based on retry interval
+                retry_minutes = self._config_cache.get('traceroute_retry_minutes', 30)
+                next_time = now + timedelta(minutes=retry_minutes)
+                # Increment failure count
+                failure_count = None  # Will be incremented in SQL
+            
+            # Update database
+            if success:
+                db.execute_update("""
+                    UPDATE users 
+                    SET last_traceroute_time = ?,
+                        last_traceroute_success = ?,
+                        next_traceroute_time = ?,
+                        traceroute_failure_count = 0
+                    WHERE node_id = ?
+                """, (now, True, next_time, node_id))
+                
+                self.logger.debug(
+                    f"Scheduled next traceroute for {node_id} at {next_time} "
+                    f"({interval_minutes} minutes from now)"
+                )
+            else:
+                db.execute_update("""
+                    UPDATE users 
+                    SET last_traceroute_time = ?,
+                        last_traceroute_success = ?,
+                        next_traceroute_time = ?,
+                        traceroute_failure_count = traceroute_failure_count + 1
+                    WHERE node_id = ?
+                """, (now, False, next_time, node_id))
+                
+                self.logger.debug(
+                    f"Scheduled retry traceroute for {node_id} at {next_time} "
+                    f"({retry_minutes} minutes from now)"
+                )
+                
+        except Exception as e:
+            self.logger.error(f"Error updating traceroute schedule for {node_id}: {e}", exc_info=True)
+    
+    async def _check_node_active(self, node_id: str) -> bool:
+        """
+        Check if a node is still active (seen recently).
+        
+        Args:
+            node_id: The node ID
+            
+        Returns:
+            True if node is active, False otherwise
+        """
+        try:
+            from core.database import get_database
+            
+            db = get_database()
+            active_hours = self._config_cache.get('active_node_hours', 24)
+            
+            rows = db.execute_query("""
+                SELECT COUNT(*) 
+                FROM users 
+                WHERE node_id = ? 
+                AND last_seen > datetime('now', '-{} hours')
+            """.format(active_hours), (node_id,))
+            
+            return rows[0][0] > 0 if rows else False
+            
+        except Exception as e:
+            self.logger.error(f"Error checking if node {node_id} is active: {e}", exc_info=True)
+            return False
+    
     def get_metadata(self) -> PluginMetadata:
         """
         Get plugin metadata.
@@ -1287,7 +1791,7 @@ class TracerouteMapperPlugin(EnhancedPlugin):
         """
         return PluginMetadata(
             name=self.name,
-            version="1.0.0",
+            version="1.2.0",
             description="Network Traceroute Mapper for automated mesh network topology discovery",
             author="ZephyrGate Team"
         )

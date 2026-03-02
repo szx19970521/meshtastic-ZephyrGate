@@ -12,6 +12,7 @@ License: GPL-3.0
 import asyncio
 import logging
 import ssl
+import threading
 from enum import Enum
 from typing import Dict, Any, Optional, Callable
 from datetime import datetime
@@ -72,6 +73,7 @@ class MQTTClient:
         # Connection state
         self._state = ConnectionState.DISCONNECTED
         self._state_lock = asyncio.Lock()
+        self._state_thread_lock = threading.Lock()  # For synchronous access
         
         # Reconnection state
         self._reconnect_attempt = 0
@@ -557,7 +559,11 @@ class MQTTClient:
         Returns:
             True if connected, False otherwise
         """
-        return self._state == ConnectionState.CONNECTED
+        with self._state_thread_lock:
+            connected = self._state == ConnectionState.CONNECTED
+        if not connected:
+            self.logger.debug(f"is_connected() returning False, state={self._state}")
+        return connected
     
     def get_state(self) -> ConnectionState:
         """
@@ -603,7 +609,23 @@ class MQTTClient:
                 f"username={username if username else 'anonymous'}, "
                 f"clean_session={session_present}"
             )
-            asyncio.create_task(self._handle_connect_success())
+            
+            # Use call_soon_threadsafe to schedule the coroutine in the event loop
+            try:
+                loop = asyncio.get_running_loop()
+                loop.call_soon_threadsafe(lambda: asyncio.create_task(self._handle_connect_success()))
+            except RuntimeError:
+                # If no event loop, handle synchronously with thread lock
+                self.logger.info("Handling connection synchronously (no running event loop)")
+                with self._state_thread_lock:
+                    self._state = ConnectionState.CONNECTED
+                    self.stats['connection_count'] += 1
+                    self.stats['last_connect_time'] = datetime.now(datetime.UTC) if hasattr(datetime, 'UTC') else datetime.utcnow()
+                    self._reconnect_attempt = 0
+                    self._should_reconnect = True
+                self._connected_event.set()
+                self._disconnected_event.clear()
+                self.logger.debug(f"Connection state set to: {self._state}")
         else:
             error_messages = {
                 1: "Connection refused - incorrect protocol version",
@@ -624,7 +646,17 @@ class MQTTClient:
                 f"broker={broker_address}:{broker_port}, "
                 f"username={username if username else 'anonymous'}"
             )
-            asyncio.create_task(self._handle_connect_failure())
+            
+            # Use call_soon_threadsafe for failure handling too
+            try:
+                loop = asyncio.get_running_loop()
+                loop.call_soon_threadsafe(lambda: asyncio.create_task(self._handle_connect_failure()))
+            except RuntimeError:
+                self.logger.info("Handling connection failure synchronously (no running event loop)")
+                with self._state_thread_lock:
+                    self._state = ConnectionState.DISCONNECTED
+                self._connected_event.clear()
+                self._disconnected_event.set()
     
     async def _handle_connect_success(self):
         """Handle successful connection."""

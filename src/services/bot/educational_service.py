@@ -132,10 +132,9 @@ class EducationalService:
         """Initialize database tables for educational features"""
         try:
             db = get_database()
-            cursor = db.cursor()
             
             # Ham test sessions and scores
-            cursor.execute("""
+            db.execute_update("""
                 CREATE TABLE IF NOT EXISTS ham_test_sessions (
                     id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
@@ -152,7 +151,7 @@ class EducationalService:
             """)
             
             # Quiz sessions and scores
-            cursor.execute("""
+            db.execute_update("""
                 CREATE TABLE IF NOT EXISTS quiz_sessions (
                     id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
@@ -168,7 +167,7 @@ class EducationalService:
             """)
             
             # Survey responses
-            cursor.execute("""
+            db.execute_update("""
                 CREATE TABLE IF NOT EXISTS survey_responses (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     survey_id TEXT NOT NULL,
@@ -182,7 +181,7 @@ class EducationalService:
             """)
             
             # Survey sessions
-            cursor.execute("""
+            db.execute_update("""
                 CREATE TABLE IF NOT EXISTS survey_sessions (
                     id TEXT PRIMARY KEY,
                     survey_id TEXT NOT NULL,
@@ -195,7 +194,6 @@ class EducationalService:
                 )
             """)
             
-            db.commit()
             self.logger.info("Educational service database tables initialized")
             
         except Exception as e:
@@ -313,10 +311,9 @@ class EducationalService:
         """Load leaderboards from database"""
         try:
             db = get_database()
-            cursor = db.cursor()
             
             # Load ham test leaderboards
-            cursor.execute("""
+            ham_results = db.execute_query("""
                 SELECT user_id, user_name, license_level, 
                        MAX(score_percentage) as best_score,
                        COUNT(*) as attempts,
@@ -327,7 +324,6 @@ class EducationalService:
                 ORDER BY best_score DESC, last_attempt DESC
             """)
             
-            ham_results = cursor.fetchall()
             for level in ['technician', 'general', 'extra']:
                 self.leaderboards[f'hamtest_{level}'] = []
             
@@ -888,13 +884,11 @@ class EducationalService:
         """Store ham test session in database"""
         try:
             db = get_database()
-            cursor = db.cursor()
-            cursor.execute("""
+            db.execute_update("""
                 INSERT INTO ham_test_sessions 
                 (id, user_id, user_name, license_level, started_at)
                 VALUES (?, ?, ?, ?, ?)
             """, (session.session_id, session.user_id, user_name, session.category, session.started_at))
-            db.commit()
         except Exception as e:
             self.logger.error(f"Error storing ham session: {e}")
     
@@ -902,15 +896,13 @@ class EducationalService:
         """Update ham test session with results"""
         try:
             db = get_database()
-            cursor = db.cursor()
-            cursor.execute("""
+            db.execute_update("""
                 UPDATE ham_test_sessions 
                 SET questions_asked = ?, correct_answers = ?, completed_at = ?, 
                     score_percentage = ?, passed = ?
                 WHERE id = ?
             """, (len(session.questions), session.score, datetime.now(), 
                   percentage, passed, session.session_id))
-            db.commit()
         except Exception as e:
             self.logger.error(f"Error updating ham session: {e}")
     
@@ -918,13 +910,11 @@ class EducationalService:
         """Store quiz session in database"""
         try:
             db = get_database()
-            cursor = db.cursor()
-            cursor.execute("""
+            db.execute_update("""
                 INSERT INTO quiz_sessions 
                 (id, user_id, user_name, category, started_at)
                 VALUES (?, ?, ?, ?, ?)
             """, (session.session_id, session.user_id, user_name, session.category, session.started_at))
-            db.commit()
         except Exception as e:
             self.logger.error(f"Error storing quiz session: {e}")
     
@@ -932,13 +922,11 @@ class EducationalService:
         """Update quiz session with results"""
         try:
             db = get_database()
-            cursor = db.cursor()
-            cursor.execute("""
+            db.execute_update("""
                 UPDATE quiz_sessions 
                 SET questions_asked = ?, correct_answers = ?, completed_at = ?, score_percentage = ?
                 WHERE id = ?
             """, (len(session.questions), session.score, datetime.now(), percentage, session.session_id))
-            db.commit()
         except Exception as e:
             self.logger.error(f"Error updating quiz session: {e}")
     
@@ -946,13 +934,11 @@ class EducationalService:
         """Store survey session in database"""
         try:
             db = get_database()
-            cursor = db.cursor()
-            cursor.execute("""
+            db.execute_update("""
                 INSERT INTO survey_sessions 
                 (id, survey_id, user_id, user_name, started_at)
                 VALUES (?, ?, ?, ?, ?)
             """, (session.session_id, survey_id, session.user_id, user_name, session.started_at))
-            db.commit()
         except Exception as e:
             self.logger.error(f"Error storing survey session: {e}")
     
@@ -961,13 +947,11 @@ class EducationalService:
         try:
             user_name = context.get('sender_name', session.user_id)
             db = get_database()
-            cursor = db.cursor()
-            cursor.execute("""
+            db.execute_update("""
                 INSERT INTO survey_responses 
                 (survey_id, user_id, user_name, question_id, response, submitted_at)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (session.survey_id, session.user_id, user_name, question.id, answer, datetime.now()))
-            db.commit()
         except Exception as e:
             self.logger.error(f"Error storing survey response: {e}")
     
@@ -975,13 +959,11 @@ class EducationalService:
         """Update survey session as completed"""
         try:
             db = get_database()
-            cursor = db.cursor()
-            cursor.execute("""
+            db.execute_update("""
                 UPDATE survey_sessions 
                 SET completed_at = ?, questions_answered = ?
                 WHERE id = ?
             """, (datetime.now(), len(session.answers), session.session_id))
-            db.commit()
         except Exception as e:
             self.logger.error(f"Error updating survey session: {e}")
     
@@ -989,12 +971,11 @@ class EducationalService:
         """Check if user has completed a survey"""
         try:
             db = get_database()
-            cursor = db.cursor()
-            cursor.execute("""
+            rows = db.execute_query("""
                 SELECT COUNT(*) FROM survey_sessions 
                 WHERE user_id = ? AND survey_id = ? AND completed_at IS NOT NULL
             """, (user_id, survey_id))
-            count = cursor.fetchone()[0]
+            count = rows[0][0]
             return count > 0
         except Exception as e:
             self.logger.error(f"Error checking survey completion: {e}")

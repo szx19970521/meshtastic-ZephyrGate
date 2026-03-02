@@ -330,7 +330,7 @@ class PluginStorage:
     def _init_storage(self):
         """Initialize plugin storage table if needed"""
         try:
-            from src.core.database import get_database
+            from core.database import get_database
             self.db = get_database()
         except Exception as e:
             self.logger.warning(f"Database not available, using in-memory storage: {e}")

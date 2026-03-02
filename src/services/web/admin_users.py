@@ -17,6 +17,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Module-level cache for WebAdminUserManager to avoid repeated file I/O
+_user_manager_cache: Optional['WebAdminUserManager'] = None
+_cache_config_file: Optional[str] = None
+
 
 class UserRole(Enum):
     """User roles for web administration"""
@@ -73,7 +77,23 @@ class WebAdminUserManager:
     Users are stored in config/web_users.yaml with hashed passwords.
     """
     
+    def __new__(cls, config_file: str = "config/web_users.yaml"):
+        """Use cached instance if available to avoid repeated file I/O"""
+        global _user_manager_cache, _cache_config_file
+        
+        if _user_manager_cache is None or _cache_config_file != config_file:
+            instance = super().__new__(cls)
+            _user_manager_cache = instance
+            _cache_config_file = config_file
+            return instance
+        
+        return _user_manager_cache
+    
     def __init__(self, config_file: str = "config/web_users.yaml"):
+        # Skip initialization if already initialized (cached instance)
+        if hasattr(self, '_initialized'):
+            return
+            
         self.config_file = Path(config_file)
         self.users: Dict[str, WebAdminUser] = {}
         self.logger = logger
@@ -88,7 +108,8 @@ class WebAdminUserManager:
         if not self.users:
             self._create_default_admin()
         
-        self.logger.info(f"WebAdminUserManager initialized with {len(self.users)} users")
+        self.logger.debug(f"WebAdminUserManager initialized with {len(self.users)} users")
+        self._initialized = True
     
     def _load_users(self):
         """Load users from config file"""
@@ -104,9 +125,9 @@ class WebAdminUserManager:
                         except Exception as e:
                             self.logger.error(f"Error loading user {username}: {e}")
                 
-                self.logger.info(f"Loaded {len(self.users)} users from {self.config_file}")
+                self.logger.debug(f"Loaded {len(self.users)} users from {self.config_file}")
             else:
-                self.logger.info(f"No user config file found at {self.config_file}")
+                self.logger.debug(f"No user config file found at {self.config_file}")
         except Exception as e:
             self.logger.error(f"Error loading users from {self.config_file}: {e}")
     

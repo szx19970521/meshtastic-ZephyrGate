@@ -9,15 +9,8 @@ Version: 1.0.0
 License: GPL-3.0
 """
 
-import sys
 import logging
-from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
-
-# Add src directory to path for imports
-src_path = Path(__file__).parent.parent.parent / "src"
-if str(src_path) not in sys.path:
-    sys.path.insert(0, str(src_path))
 
 from models.message import Message, MessageType
 

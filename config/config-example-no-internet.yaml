@@ -366,15 +366,20 @@ traceroute_mapper:
   enabled: false  # Enable if you want local topology mapping
   
   # Rate Limiting
-  traceroutes_per_minute: 1
+  seconds_between_traceroutes: 120  # Wait 120 seconds between sending traceroutes
   burst_multiplier: 2
+  
+  # Traceroute Scheduling (Database-backed)
+  traceroute_interval_minutes: 180  # Wait 180 minutes (3 hours) between successful traceroutes
+  traceroute_retry_minutes: 30  # Wait 30 minutes before retrying failed traceroutes
+  active_node_hours: 24  # Only traceroute nodes seen in last 24 hours
   
   # Priority Queue
   queue_max_size: 500
   queue_overflow_strategy: "drop_lowest_priority"
   clear_queue_on_startup: false
   
-  # Periodic Rechecks
+  # Periodic Rechecks (Deprecated - use traceroute_interval_minutes)
   recheck_interval_hours: 6
   recheck_enabled: true
   
@@ -389,7 +394,7 @@ traceroute_mapper:
   startup_delay_seconds: 60
   
   # Node Filtering
-  skip_direct_nodes: true
+  skip_direct_nodes: true  # Skip direct nodes (0 hops) - only trace multi-hop nodes
   blacklist: []
   whitelist: []
   exclude_roles: ["CLIENT"]

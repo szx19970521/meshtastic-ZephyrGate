@@ -131,7 +131,13 @@ class MessageClassifier:
     def classify_message(self, message: Message, user: Optional[UserProfile] = None) -> List[str]:
         """Classify message and return list of target services"""
         services = []
-        content = message.content.strip()
+        content = (message.content or "").strip()
+        
+        # Always route to MQTT gateway for all message types
+        services.append('mqtt_gateway')
+        
+        # Always route to traceroute_mapper for topology mapping
+        services.append('traceroute_mapper')
         
         # Emergency response - highest priority
         if self._matches_patterns(content, self.sos_patterns):
@@ -164,8 +170,8 @@ class MessageClassifier:
             services.append('bot')
             self.logger.info(f"High-altitude message from {message.sender_id} at {user.altitude}m")
         
-        # Default to bot if no specific service matches
-        if not services:
+        # Default to bot if no specific service matches (except mqtt_gateway and traceroute_mapper which are always included)
+        if len(services) == 2:  # Only mqtt_gateway and traceroute_mapper in list
             services.append('bot')
         
         return services
@@ -667,6 +673,10 @@ class CoreMessageRouter:
         """Chunk large messages into smaller pieces with proper UTF-8 handling"""
         content = message.content
         
+        # Don't chunk empty messages (e.g., traceroute requests)
+        if not content:
+            return [message]
+        
         # Use actual Meshtastic limit (233 bytes for DATA_PAYLOAD_LEN)
         # Leave some safety margin for encoding overhead
         actual_max_size = 230
@@ -800,12 +810,29 @@ class CoreMessageRouter:
     async def _store_message_history(self, message: Message):
         """Store message in database history"""
         try:
+            # Only create/update user records for messages from the primary interface
+            # (not from MQTT, which would create records for nodes we can't directly reach)
+            is_primary_interface = message.interface_id and message.interface_id.startswith('primary')
+            
             # Ensure sender exists in users table (to satisfy foreign key)
             if message.sender_id:
-                self._ensure_user_exists(message.sender_id)
+                if is_primary_interface:
+                    self._ensure_user_exists(message.sender_id)
+                else:
+                    # For non-primary interfaces (like MQTT), only ensure if user already exists
+                    # This prevents creating records for nodes we've never directly heard
+                    if not self.db.get_user(message.sender_id):
+                        # Create minimal record to satisfy foreign key, but mark as MQTT-only
+                        self.logger.debug(f"Skipping user creation for {message.sender_id} from non-primary interface {message.interface_id}")
+                        # Don't create the user - let the foreign key constraint handle it
+                        # Or create with a flag indicating it's MQTT-only
+                        pass
+                    else:
+                        # User exists, update last_seen
+                        self._ensure_user_exists(message.sender_id)
             
-            # Ensure recipient exists if specified
-            if message.recipient_id:
+            # Ensure recipient exists if specified (but not for broadcast addresses)
+            if message.recipient_id and is_primary_interface and message.recipient_id not in ['^all', '!ffffffff', 'broadcast']:
                 self._ensure_user_exists(message.recipient_id)
             
             self.db.execute_update(
@@ -834,6 +861,17 @@ class CoreMessageRouter:
     def _ensure_user_exists(self, node_id: str, short_name: str = None):
         """Ensure user exists in database, create if not"""
         try:
+            # Filter out invalid/special node IDs
+            # Valid node IDs start with '!' followed by 8 hex characters
+            if not node_id or not node_id.startswith('!') or len(node_id) != 9:
+                self.logger.debug(f"Skipping invalid node ID: {node_id}")
+                return
+            
+            # Filter out special broadcast addresses
+            if node_id in ['!ffffffff', '^all', 'broadcast']:
+                self.logger.debug(f"Skipping broadcast address: {node_id}")
+                return
+            
             # Check if user exists
             existing = self.db.get_user(node_id)
             if not existing:

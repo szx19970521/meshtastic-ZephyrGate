@@ -646,9 +646,7 @@ class InteractiveBotService:
         """Load known nodes from database"""
         try:
             db = get_database()
-            cursor = db.cursor()
-            cursor.execute("SELECT DISTINCT node_id FROM users WHERE last_seen > datetime('now', '-30 days')")
-            rows = cursor.fetchall()
+            rows = db.execute_query("SELECT DISTINCT node_id FROM users WHERE last_seen > datetime('now', '-30 days')")
             self.known_nodes = {row[0] for row in rows}
             self.logger.debug(f"Loaded {len(self.known_nodes)} known nodes from database")
         except Exception as e:
@@ -750,12 +748,10 @@ class InteractiveBotService:
         """Store new node in database"""
         try:
             db = get_database()
-            cursor = db.cursor()
-            cursor.execute("""
+            db.execute_update("""
                 INSERT OR IGNORE INTO users (node_id, short_name, last_seen)
                 VALUES (?, ?, ?)
             """, (node_id, node_id[-4:], datetime.utcnow()))
-            db.commit()
         except Exception as e:
             self.logger.error(f"Error storing new node {node_id}: {e}")
     
@@ -1341,10 +1337,9 @@ class InteractiveBotService:
         """Get recent messages for context"""
         try:
             db = get_database()
-            cursor = db.cursor()
             
             # Get recent messages from this sender and bot responses
-            cursor.execute("""
+            rows = db.execute_query("""
                 SELECT sender_id, recipient_id, channel, content, timestamp, message_type
                 FROM messages 
                 WHERE (sender_id = ? OR recipient_id = ?) 
@@ -1353,7 +1348,6 @@ class InteractiveBotService:
                 LIMIT ?
             """, (sender_id, sender_id, limit))
             
-            rows = cursor.fetchall()
             messages = []
             
             for row in rows:

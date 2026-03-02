@@ -31,6 +31,7 @@ Welcome to the ZephyrGate documentation! This directory contains comprehensive g
 | Document | Description | Audience |
 |----------|-------------|----------|
 | [Admin Guide](ADMIN_GUIDE.md) | Complete system administration guide including installation, configuration, Docker deployment, MQTT Gateway, auto-response, scheduled broadcasts, maintenance, backup, and troubleshooting | Administrators |
+| [Configuration Reference](CONFIGURATION_REFERENCE.md) | Comprehensive reference for all config.yaml options with detailed explanations | Administrators |
 | [Testing Guide](TESTING_GUIDE.md) | Testing infrastructure and procedures (50+ pages) | Administrators, Developers |
 
 ### Developer Documentation
@@ -56,6 +57,9 @@ Welcome to the ZephyrGate documentation! This directory contains comprehensive g
 **Configure auto-responses or scheduled broadcasts**
 - → See [Admin Guide - Auto-Response](ADMIN_GUIDE.md#auto-response-configuration) and [Admin Guide - Scheduled Broadcasts](ADMIN_GUIDE.md#scheduled-broadcasts)
 
+**Configure system settings**
+- → Check [Configuration Reference](CONFIGURATION_REFERENCE.md) for all config.yaml options
+
 **Set up MQTT Gateway**
 - → Follow [Admin Guide - MQTT Gateway](ADMIN_GUIDE.md#mqtt-gateway) section
 
@@ -73,12 +77,27 @@ Welcome to the ZephyrGate documentation! This directory contains comprehensive g
 
 ## 📖 Documentation Statistics
 
-- **Total Documents**: 21 comprehensive guides
-- **Total Pages**: ~280 pages of documentation
-- **Total Lines**: ~23,000 lines
-- **Last Updated**: 2026-02-07 (Version 2.0)
+- **Total Documents**: 22 comprehensive guides
+- **Total Pages**: ~300 pages of documentation
+- **Total Lines**: ~26,000 lines
+- **Last Updated**: 2026-03-01 (Version 2.1)
 
-## 🔄 Recent Updates (v2.0)
+## 🔄 Recent Updates (v2.1)
+
+### New Documentation
+- **Configuration Reference**: Complete reference for all config.yaml options
+  - Detailed explanations for every configuration parameter
+  - Best practices and troubleshooting tips
+  - Examples for common scenarios
+  - Network health and performance tuning guidance
+
+### Traceroute Mapper Updates
+- Database-backed scheduling with `traceroute_interval_minutes` and `traceroute_retry_minutes`
+- Active node filtering with `active_node_hours`
+- Direct node handling (0 hops) with improved detection
+- Enhanced logging and debugging capabilities
+
+## 🔄 Previous Updates (v2.0)
 
 ### New Features Documented
 - **MQTT Gateway**: Complete setup and configuration guide
@@ -144,6 +163,22 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for details.
 - Docker deployment (single container and Docker Compose)
 
 This guide consolidates what were previously 9 separate guides into one well-organized resource.
+
+### Configuration Reference
+**Complete configuration documentation** covering:
+- All config.yaml options with detailed explanations
+- Core system settings (debug, logging, database)
+- Meshtastic interface configuration (serial, TCP, BLE)
+- Plugin-specific settings for all 11+ plugins
+- Traceroute mapper with database-backed scheduling
+- MQTT Gateway configuration
+- Network health protection (quiet hours, congestion detection, emergency stop)
+- Scheduled broadcasts with cron expressions
+- Security best practices
+- Performance tuning guidelines
+- Troubleshooting common configuration issues
+
+Essential reference for administrators configuring and tuning ZephyrGate.
 
 ### User Manual
 The complete user reference covering:

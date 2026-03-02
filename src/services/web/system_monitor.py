@@ -86,7 +86,7 @@ class SystemMonitor:
     node status, and active alerts.
     """
     
-    def __init__(self, plugin_manager=None):
+    def __init__(self, plugin_manager=None, active_node_timeout_minutes=60):
         self.plugin_manager = plugin_manager
         self.logger = logger
         
@@ -98,7 +98,8 @@ class SystemMonitor:
         
         # Configuration
         self.metrics_history_limit = 100
-        self.node_timeout = 300  # 5 minutes
+        self.node_timeout = 7200  # 120 minutes (2 hours) - Meshtastic nodes can be slow to update
+        self.active_node_timeout = active_node_timeout_minutes * 60  # Convert minutes to seconds
         self.metrics_interval = 30  # 30 seconds
         
         # Monitoring tasks
@@ -109,7 +110,7 @@ class SystemMonitor:
         self.network_stats_baseline = None
         self.start_time = time.time()
         
-        self.logger.info("SystemMonitor initialized")
+        self.logger.info(f"SystemMonitor initialized (active_node_timeout={active_node_timeout_minutes} minutes)")
     
     async def start(self):
         """Start system monitoring"""
@@ -315,14 +316,91 @@ class SystemMonitor:
         try:
             node_id = message.sender_id
             
-            # Create or update node
+            # If this is a NODEINFO message, update node information from database
+            if message.message_type == MessageType.NODEINFO:
+                self.logger.debug(f"Received NODEINFO for {node_id}, updating node information")
+                try:
+                    from core.database import get_database
+                    db = get_database()
+                    if db:
+                        query = """
+                            SELECT u.short_name, u.long_name, h.hardware_model, h.role
+                            FROM users u
+                            LEFT JOIN node_hardware h ON u.node_id = h.node_id
+                            WHERE u.node_id = ?
+                        """
+                        rows = db.execute_query(query, (node_id,))
+                        if rows and len(rows) > 0:
+                            row = rows[0]
+                            short_name = row[0] or f"Node-{node_id[-4:]}"
+                            long_name = row[1] or f"Unknown Node {node_id}"
+                            hardware = row[2] or "Unknown"
+                            role = row[3] or "CLIENT"
+                            
+                            # Update existing node or create new one
+                            if node_id in self.nodes:
+                                self.nodes[node_id].short_name = short_name
+                                self.nodes[node_id].long_name = long_name
+                                self.nodes[node_id].hardware = hardware
+                                self.nodes[node_id].role = role
+                                self.logger.info(f"Updated node info for {node_id}: {short_name} - {long_name} ({hardware})")
+                            else:
+                                self.nodes[node_id] = NodeStatus(
+                                    node_id=node_id,
+                                    short_name=short_name,
+                                    long_name=long_name,
+                                    hardware=hardware,
+                                    role=role
+                                )
+                                self.logger.info(f"Created node entry for {node_id}: {short_name} - {long_name} ({hardware})")
+                except Exception as e:
+                    self.logger.debug(f"Error updating node info from database: {e}")
+            
+            # Create or update node if it doesn't exist
             if node_id not in self.nodes:
+                # Try to get node info from database
+                try:
+                    from core.database import get_database
+                    db = get_database()
+                    if db:
+                        query = """
+                            SELECT u.short_name, u.long_name, h.hardware_model, h.role
+                            FROM users u
+                            LEFT JOIN node_hardware h ON u.node_id = h.node_id
+                            WHERE u.node_id = ?
+                        """
+                        rows = db.execute_query(query, (node_id,))
+                        if rows and len(rows) > 0:
+                            row = rows[0]
+                            short_name = row[0] or f"Node-{node_id[-4:]}"
+                            long_name = row[1] or f"Unknown Node {node_id}"
+                            hardware = row[2] or "Unknown"
+                            role = row[3] or "CLIENT"
+                        else:
+                            # Node not in database yet
+                            short_name = f"Node-{node_id[-4:]}"
+                            long_name = f"Unknown Node {node_id}"
+                            hardware = "Unknown"
+                            role = "CLIENT"
+                    else:
+                        # No database available
+                        short_name = f"Node-{node_id[-4:]}"
+                        long_name = f"Unknown Node {node_id}"
+                        hardware = "Unknown"
+                        role = "CLIENT"
+                except Exception as e:
+                    self.logger.debug(f"Error fetching node info from database: {e}")
+                    short_name = f"Node-{node_id[-4:]}"
+                    long_name = f"Unknown Node {node_id}"
+                    hardware = "Unknown"
+                    role = "CLIENT"
+                
                 self.nodes[node_id] = NodeStatus(
                     node_id=node_id,
-                    short_name=f"Node-{node_id[-4:]}",
-                    long_name=f"Unknown Node {node_id}",
-                    hardware="Unknown",
-                    role="CLIENT"
+                    short_name=short_name,
+                    long_name=long_name,
+                    hardware=hardware,
+                    role=role
                 )
             
             node = self.nodes[node_id]
@@ -403,6 +481,16 @@ class SystemMonitor:
         """Get list of online nodes"""
         return [node for node in self.nodes.values() if node.is_online]
     
+    def get_active_nodes(self) -> List[NodeStatus]:
+        """Get list of active nodes (seen within active_node_timeout)"""
+        current_time = datetime.now(timezone.utc)
+        active_nodes = []
+        for node in self.nodes.values():
+            time_diff = (current_time - node.last_seen).total_seconds()
+            if time_diff <= self.active_node_timeout:
+                active_nodes.append(node)
+        return active_nodes
+    
     def get_all_nodes(self) -> List[NodeStatus]:
         """Get list of all nodes"""
         return list(self.nodes.values())
@@ -422,7 +510,7 @@ class SystemMonitor:
     def get_system_summary(self) -> Dict[str, Any]:
         """Get system summary for dashboard"""
         current_metrics = self.get_current_metrics()
-        online_nodes = self.get_online_nodes()
+        active_nodes = self.get_active_nodes()  # Changed from get_online_nodes()
         active_alerts = self.get_active_alerts()
         services = self.get_service_status()
         
@@ -432,7 +520,7 @@ class SystemMonitor:
             "cpu_percent": current_metrics.cpu_percent if current_metrics else 0,
             "memory_percent": current_metrics.memory_percent if current_metrics else 0,
             "disk_percent": current_metrics.disk_percent if current_metrics else 0,
-            "node_count": len(online_nodes),
+            "node_count": len(active_nodes),  # Now counts active nodes (within timeout)
             "total_nodes": len(self.nodes),
             "active_alerts": len(active_alerts),
             "running_services": len([s for s in services if s.status == "running"]),

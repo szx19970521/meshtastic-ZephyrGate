@@ -145,9 +145,10 @@ class NodeStateTracker:
         Determine if a node is direct based on hop count and signal strength.
         
         A node is considered direct if:
-        - hop_count is 0 or 1
+        - hop_count is 0 (direct connection, no intermediate nodes)
         
-        Note: SNR/RSSI alone don't determine direct status, as these can be
+        Note: hop_count=1 means there is ONE intermediate node, so it's not direct.
+        SNR/RSSI alone don't determine direct status, as these can be
         reported for indirect nodes as well. Only hop_count is reliable.
         
         Args:
@@ -159,7 +160,8 @@ class NodeStateTracker:
             True if the node appears to be directly heard
         """
         # Check hop count - this is the most reliable indicator
-        if hop_count is not None and hop_count <= 1:
+        # Only hop_count=0 is direct (no intermediate nodes)
+        if hop_count is not None and hop_count < 1:
             return True
         
         return False

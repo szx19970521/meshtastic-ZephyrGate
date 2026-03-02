@@ -9,7 +9,7 @@ unified plugin architecture.
 import asyncio
 import sys
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 # Add src directory to path for imports
 src_path = Path(__file__).parent.parent.parent / "src"
@@ -49,12 +49,24 @@ class WebServicePlugin(EnhancedPlugin):
             # Initialize the web admin service
             await self.web_service.start()
             
+            # Register message handler to receive all mesh messages
+            self.register_message_handler(self._handle_mesh_message)
+            
             self.logger.info("Web Admin Service Plugin initialized successfully")
             return True
             
         except Exception as e:
             self.logger.error(f"Failed to initialize web admin service: {e}", exc_info=True)
             return False
+    
+    async def _handle_mesh_message(self, message: Message, context: Dict[str, Any]) -> Optional[Any]:
+        """Handle incoming mesh messages and forward to web service"""
+        try:
+            if hasattr(self, 'web_service') and self.web_service:
+                self.web_service.handle_mesh_message(message)
+        except Exception as e:
+            self.logger.error(f"Error forwarding message to web service: {e}")
+        return None
     
     async def cleanup(self):
         """Clean up web admin service resources"""

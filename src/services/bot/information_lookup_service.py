@@ -352,18 +352,15 @@ class InformationLookupService:
         
         try:
             db = get_database()
-            cursor = db.cursor()
             
             # Get recently heard nodes with signal information
-            cursor.execute("""
+            rows = db.execute_query("""
                 SELECT node_id, short_name, last_seen, snr, rssi, hop_count, battery_level
                 FROM users 
                 WHERE last_seen > datetime('now', '-24 hours')
                 ORDER BY last_seen DESC 
                 LIMIT ?
             """, (limit,))
-            
-            rows = cursor.fetchall()
             
             if not rows:
                 return "📡 No nodes heard in the last 24 hours"
@@ -555,7 +552,6 @@ class InformationLookupService:
         
         try:
             db = get_database()
-            cursor = db.cursor()
             
             # Get message history (this would need to be implemented in message storage)
             # For now, return a placeholder
@@ -721,9 +717,8 @@ class InformationLookupService:
         
         try:
             db = get_database()
-            cursor = db.cursor()
             
-            cursor.execute("""
+            rows = db.execute_query("""
                 SELECT node_id, short_name, long_name, last_seen, 
                        location_lat, location_lon, altitude, battery_level, 
                        voltage, snr, rssi, hop_count, hardware_model, 
@@ -732,9 +727,10 @@ class InformationLookupService:
                 WHERE node_id = ?
             """, (node_id,))
             
-            row = cursor.fetchone()
-            if not row:
+            if not rows:
                 return None
+            
+            row = rows[0]
             
             # Parse the row data
             (node_id, short_name, long_name, last_seen_str, 
@@ -798,19 +794,15 @@ class InformationLookupService:
         
         try:
             db = get_database()
-            cursor = db.cursor()
             
             # Total nodes
-            cursor.execute("SELECT COUNT(*) FROM users")
-            total_nodes = cursor.fetchone()[0]
+            total_nodes = db.execute_query("SELECT COUNT(*) FROM users")[0][0]
             
             # Active nodes (last 24 hours)
-            cursor.execute("SELECT COUNT(*) FROM users WHERE last_seen > datetime('now', '-24 hours')")
-            nodes_last_day = cursor.fetchone()[0]
+            nodes_last_day = db.execute_query("SELECT COUNT(*) FROM users WHERE last_seen > datetime('now', '-24 hours')")[0][0]
             
             # Active nodes (last hour)
-            cursor.execute("SELECT COUNT(*) FROM users WHERE last_seen > datetime('now', '-1 hour')")
-            nodes_last_hour = cursor.fetchone()[0]
+            nodes_last_hour = db.execute_query("SELECT COUNT(*) FROM users WHERE last_seen > datetime('now', '-1 hour')")[0][0]
             
             # Message statistics would need message logging
             # For now, use placeholder values
@@ -819,14 +811,12 @@ class InformationLookupService:
             messages_last_day = 0
             
             # Signal quality averages
-            cursor.execute("SELECT AVG(snr), AVG(rssi) FROM users WHERE snr IS NOT NULL AND last_seen > datetime('now', '-24 hours')")
-            avg_row = cursor.fetchone()
+            avg_row = db.execute_query("SELECT AVG(snr), AVG(rssi) FROM users WHERE snr IS NOT NULL AND last_seen > datetime('now', '-24 hours')")[0]
             average_snr = avg_row[0] if avg_row[0] is not None else None
             average_rssi = avg_row[1] if avg_row[1] is not None else None
             
             # Network diameter (max hop count)
-            cursor.execute("SELECT MAX(hop_count) FROM users WHERE hop_count IS NOT NULL")
-            diameter_row = cursor.fetchone()
+            diameter_row = db.execute_query("SELECT MAX(hop_count) FROM users WHERE hop_count IS NOT NULL")[0]
             network_diameter = diameter_row[0] if diameter_row[0] is not None else None
             
             stats = NetworkStats(
@@ -865,9 +855,8 @@ class InformationLookupService:
         """Get node role distribution statistics"""
         try:
             db = get_database()
-            cursor = db.cursor()
             
-            cursor.execute("""
+            rows = db.execute_query("""
                 SELECT role, COUNT(*) 
                 FROM users 
                 WHERE role IS NOT NULL AND last_seen > datetime('now', '-7 days')
@@ -875,7 +864,6 @@ class InformationLookupService:
                 ORDER BY COUNT(*) DESC
             """)
             
-            rows = cursor.fetchall()
             return {role: count for role, count in rows}
             
         except Exception as e:
@@ -894,17 +882,14 @@ class InformationLookupService:
         """Get battery level leaderboard"""
         try:
             db = get_database()
-            cursor = db.cursor()
             
-            cursor.execute("""
+            rows = db.execute_query("""
                 SELECT short_name, node_id, battery_level
                 FROM users 
                 WHERE battery_level IS NOT NULL AND last_seen > datetime('now', '-24 hours')
                 ORDER BY battery_level DESC
                 LIMIT 10
             """)
-            
-            rows = cursor.fetchall()
             
             if not rows:
                 return f"🔋 **Battery Leaderboard**\n\n❌ No battery data available"
@@ -925,17 +910,14 @@ class InformationLookupService:
         """Get signal quality leaderboard"""
         try:
             db = get_database()
-            cursor = db.cursor()
             
-            cursor.execute("""
+            rows = db.execute_query("""
                 SELECT short_name, node_id, snr, rssi
                 FROM users 
                 WHERE snr IS NOT NULL AND last_seen > datetime('now', '-24 hours')
                 ORDER BY snr DESC
                 LIMIT 10
             """)
-            
-            rows = cursor.fetchall()
             
             if not rows:
                 return f"📶 **Signal Quality Leaderboard**\n\n❌ No signal data available"
@@ -964,16 +946,13 @@ class InformationLookupService:
         
         try:
             db = get_database()
-            cursor = db.cursor()
             
-            cursor.execute("""
+            rows = db.execute_query("""
                 SELECT short_name, node_id, location_lat, location_lon
                 FROM users 
                 WHERE location_lat IS NOT NULL AND location_lon IS NOT NULL 
                 AND node_id != ? AND last_seen > datetime('now', '-24 hours')
             """, (reference_node,))
-            
-            rows = cursor.fetchall()
             
             if not rows:
                 return f"📏 **Distance Leaderboard**\n\n❌ No location data available for other nodes"

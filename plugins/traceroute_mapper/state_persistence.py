@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import asdict
 
-from plugins.traceroute_mapper.node_state_tracker import NodeState
+from .node_state_tracker import NodeState
 
 
 logger = logging.getLogger(__name__)

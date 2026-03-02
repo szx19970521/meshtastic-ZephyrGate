@@ -861,8 +861,16 @@ traceroute_mapper:
   # RATE LIMITING
   # ---------------------------------------------------------------------------
   # Control how frequently traceroutes are sent to avoid overwhelming the network
-  traceroutes_per_minute: 1  # Maximum traceroutes per minute (default: 1)
+  seconds_between_traceroutes: 120  # Wait 120 seconds between sending traceroutes (rate limit)
   burst_multiplier: 2  # Allow short bursts (capacity = rate * burst_multiplier)
+  
+  # ---------------------------------------------------------------------------
+  # TRACEROUTE SCHEDULING (Database-backed)
+  # ---------------------------------------------------------------------------
+  # Control when nodes are re-traced using database fields
+  traceroute_interval_minutes: 180  # Wait 180 minutes (3 hours) between successful traceroutes for same node
+  traceroute_retry_minutes: 30  # Wait 30 minutes before retrying failed traceroutes
+  active_node_hours: 24  # Only traceroute nodes seen in last 24 hours (inactive nodes are skipped)
   
   # ---------------------------------------------------------------------------
   # PRIORITY QUEUE
@@ -876,10 +884,10 @@ traceroute_mapper:
   clear_queue_on_startup: false  # Clear queue when plugin starts
   
   # ---------------------------------------------------------------------------
-  # PERIODIC RECHECKS
+  # PERIODIC RECHECKS (Deprecated - use traceroute_interval_minutes)
   # ---------------------------------------------------------------------------
   # Re-trace nodes periodically to detect topology changes
-  recheck_interval_hours: 6  # Hours between rechecks (default: 6, 0 = disabled)
+  recheck_interval_hours: 6  # Hours between rechecks (deprecated, use traceroute_interval_minutes)
   recheck_enabled: true  # Enable periodic rechecks
   
   # ---------------------------------------------------------------------------
@@ -900,7 +908,7 @@ traceroute_mapper:
   # NODE FILTERING
   # ---------------------------------------------------------------------------
   # Control which nodes are traced
-  skip_direct_nodes: true  # Don't trace nodes directly heard (1 hop away)
+  skip_direct_nodes: true  # Don't trace nodes directly heard (0 hops away) - only trace multi-hop nodes
   blacklist: []  # Node IDs to never trace (e.g., ["!a1b2c3d4", "!e5f6g7h8"])
   whitelist: []  # If set, only trace these node IDs (overrides blacklist)
   exclude_roles: ["CLIENT"]  # Don't trace nodes with these roles

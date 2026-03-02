@@ -537,9 +537,16 @@ class ZephyrGateApplication:
         self.running = True
         self.logger.info("ZephyrGate is now running")
         
-        # Set up signal handlers
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        signal.signal(signal.SIGINT, self._signal_handler)
+        # Set up signal handlers using asyncio's add_signal_handler
+        loop = asyncio.get_running_loop()
+        
+        def handle_shutdown():
+            self.logger.info("Shutdown signal received")
+            self.shutdown_event.set()
+        
+        # Register signal handlers
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, handle_shutdown)
         
         try:
             # Start all services
@@ -629,11 +636,6 @@ class ZephyrGateApplication:
                 break
             except Exception as e:
                 self.logger.error(f"Error in stats reporter: {e}")
-    
-    def _signal_handler(self, signum, frame):
-        """Handle shutdown signals"""
-        self.logger.info(f"Received signal {signum}")
-        self.shutdown_event.set()
     
     async def shutdown(self):
         """Shutdown the application gracefully"""

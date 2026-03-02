@@ -83,6 +83,7 @@ class NodeInfo(BaseModel):
     snr: Optional[float] = None
     last_seen: datetime
     location: Optional[Dict[str, float]] = None
+    hops_away: int = 0
 
 
 class MessageInfo(BaseModel):
@@ -774,7 +775,11 @@ class WebAdminService(BasePlugin):
         self.security_manager = SecurityManager(security_policy)
         self.auth_manager = AuthenticationManager(self.secret_key, self.security_manager)
         self.websocket_manager = WebSocketManager()
-        self.system_monitor = SystemMonitor(plugin_manager)
+        
+        # Get active node timeout from config (default 60 minutes)
+        active_node_timeout_minutes = config.get("active_node_timeout_minutes", 60)
+        self.system_monitor = SystemMonitor(plugin_manager, active_node_timeout_minutes)
+        
         self.user_manager = UserManager()
         self.scheduler = BroadcastScheduler(message_sender=self._send_message_via_router)
         
@@ -807,6 +812,10 @@ class WebAdminService(BasePlugin):
         self.nodes_cache = {}
         self.messages_cache = []
         self.cache_update_interval = 30  # seconds
+        
+        # System events storage (in-memory, max 100 events)
+        self.system_events = []
+        self.max_system_events = 100
         
         # Real-time update task
         self.update_task = None
@@ -866,9 +875,7 @@ class WebAdminService(BasePlugin):
             # Validate session if session_id is in token
             session_id = token_data.get("payload", {}).get("session_id")
             if session_id:
-                self.logger.info(f"Validating session {session_id} for user {username} from IP {client_ip}")
-                self.logger.info(f"Active sessions count: {len(self.security_manager.active_sessions)}")
-                self.logger.info(f"Session exists in active_sessions: {session_id in self.security_manager.active_sessions}")
+                self.logger.debug(f"Validating session {session_id} for user {username} from IP {client_ip}")
                 
                 session_data = self.auth_manager.validate_session(session_id, client_ip)
                 if not session_data:
@@ -2641,6 +2648,47 @@ class WebAdminService(BasePlugin):
         ):
             return await self._update_config(update, username)
         
+        # Traceroute routes
+        @self.app.get("/api/traceroute/history")
+        async def get_traceroute_history(
+            limit: int = 50,
+            username: str = Depends(require_permission(Permission.SYSTEM_MONITOR))
+        ):
+            """Get recent traceroute history"""
+            return await self._get_traceroute_history(limit)
+        
+        @self.app.get("/api/traceroute/upcoming")
+        async def get_upcoming_traceroutes(
+            limit: int = 50,
+            username: str = Depends(require_permission(Permission.SYSTEM_MONITOR))
+        ):
+            """Get upcoming scheduled traceroutes"""
+            return await self._get_upcoming_traceroutes(limit)
+        
+        @self.app.post("/api/traceroute/queue/{node_id}")
+        async def queue_traceroute(
+            node_id: str,
+            username: str = Depends(require_permission(Permission.SYSTEM_ADMIN))
+        ):
+            """Manually queue a traceroute for a specific node"""
+            return await self._queue_traceroute_now(node_id)
+        
+        @self.app.get("/api/traceroute/stats")
+        async def get_traceroute_stats(
+            username: str = Depends(require_permission(Permission.SYSTEM_MONITOR))
+        ):
+            """Get traceroute statistics"""
+            return await self._get_traceroute_stats()
+        
+        # System events route
+        @self.app.get("/api/system/events")
+        async def get_system_events(
+            limit: int = 20,
+            username: str = Depends(require_permission(Permission.SYSTEM_MONITOR))
+        ):
+            """Get recent system events"""
+            return await self._get_system_events(limit)
+        
         # WebSocket endpoint
         @self.app.websocket("/ws/{client_id}")
         async def websocket_endpoint(websocket: WebSocket, client_id: str):
@@ -2688,10 +2736,15 @@ class WebAdminService(BasePlugin):
                     
                     for message in new_messages:
                         message_data = self._message_to_response(message)
+                        # Convert to dict and handle datetime serialization
+                        message_dict = message_data.dict()
+                        if 'timestamp' in message_dict and isinstance(message_dict['timestamp'], datetime):
+                            message_dict['timestamp'] = message_dict['timestamp'].isoformat()
+                        
                         await self.websocket_manager.broadcast(
                             json.dumps({
                                 "type": "new_message",
-                                "data": message_data.dict()
+                                "data": message_dict
                             }),
                             permission_required="read"
                         )
@@ -2748,7 +2801,8 @@ class WebAdminService(BasePlugin):
                 battery_level=node.battery_level,
                 snr=node.snr,
                 last_seen=node.last_seen,
-                location=node.location
+                location=node.location,
+                hops_away=node.hops_away
             )
             for node in nodes
         ]
@@ -2762,6 +2816,14 @@ class WebAdminService(BasePlugin):
         """Send broadcast message"""
         # This would integrate with the message router
         self.logger.info(f"Broadcast message from {username}: {message.content}")
+        
+        # Log system event
+        self._log_system_event(
+            "broadcast_sent",
+            f"Broadcast sent by {username}: {message.content[:50]}{'...' if len(message.content) > 50 else ''}",
+            "info",
+            "broadcast"
+        )
         
         # Notify WebSocket clients
         await self.websocket_manager.broadcast(
@@ -2787,6 +2849,336 @@ class WebAdminService(BasePlugin):
         self.logger.info(f"Config update by {username}: {update.key} = {update.value}")
         return {"status": "updated"}
     
+    async def _get_traceroute_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get recent traceroute history from database"""
+        try:
+            from core.database import get_database
+            db = get_database()
+            
+            # Query for recent traceroutes
+            rows = db.execute_query("""
+                SELECT 
+                    node_id,
+                    short_name,
+                    long_name,
+                    last_traceroute_time,
+                    last_traceroute_success,
+                    traceroute_failure_count,
+                    hop_count
+                FROM users
+                WHERE last_traceroute_time IS NOT NULL
+                ORDER BY last_traceroute_time DESC
+                LIMIT ?
+            """, (limit,))
+            
+            history = []
+            for row in rows:
+                history.append({
+                    'node_id': row[0],
+                    'short_name': row[1] or row[0][-4:],
+                    'long_name': row[2] or 'Unknown',
+                    'timestamp': row[3],
+                    'success': bool(row[4]) if row[4] is not None else None,
+                    'failure_count': row[5] or 0,
+                    'hop_count': row[6]
+                })
+            
+            return history
+            
+        except Exception as e:
+            self.logger.error(f"Error getting traceroute history: {e}", exc_info=True)
+            return []
+    
+    async def _get_upcoming_traceroutes(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get upcoming scheduled traceroutes from database"""
+        try:
+            from core.database import get_database
+            db = get_database()
+            
+            # Get traceroute plugin to check queue status
+            traceroute_plugin = None
+            if hasattr(self, 'plugin_manager') and self.plugin_manager:
+                plugin_info = self.plugin_manager.get_plugin_info('traceroute_mapper')
+                if plugin_info and plugin_info.instance:
+                    traceroute_plugin = plugin_info.instance
+            
+            # Query for upcoming traceroutes - show nodes that:
+            # 1. Have a scheduled time (next_traceroute_time IS NOT NULL)
+            # 2. OR are active indirect nodes that haven't been scheduled yet (NULL next_traceroute_time)
+            query = """
+                SELECT 
+                    node_id,
+                    short_name,
+                    long_name,
+                    next_traceroute_time,
+                    last_traceroute_success,
+                    traceroute_failure_count,
+                    last_seen,
+                    hop_count
+                FROM users
+                WHERE (
+                    next_traceroute_time IS NOT NULL
+                    OR (
+                        next_traceroute_time IS NULL 
+                        AND hop_count >= 1
+                        AND last_seen > datetime('now', '-24 hours')
+                    )
+                )
+                ORDER BY 
+                    CASE 
+                        WHEN next_traceroute_time IS NULL THEN 0
+                        WHEN next_traceroute_time <= datetime('now') THEN 1
+                        ELSE 2
+                    END,
+                    next_traceroute_time ASC
+                LIMIT ?
+            """
+            
+            rows = db.execute_query(query, (limit,))
+            
+            upcoming = []
+            now = datetime.utcnow()
+            
+            for row in rows:
+                node_id = row[0]
+                next_time_str = row[3]
+                
+                # Check if node is in queue
+                in_queue = False
+                if traceroute_plugin and hasattr(traceroute_plugin, 'priority_queue'):
+                    in_queue = traceroute_plugin.priority_queue.contains(node_id)
+                
+                # Handle nodes that haven't been scheduled yet (NULL next_traceroute_time)
+                if next_time_str is None:
+                    upcoming.append({
+                        'node_id': node_id,
+                        'short_name': row[1] or node_id[-4:],
+                        'long_name': row[2] or 'Unknown',
+                        'scheduled_time': None,
+                        'minutes_until': 0,
+                        'last_success': bool(row[4]) if row[4] is not None else None,
+                        'failure_count': row[5] or 0,
+                        'last_seen': row[6],
+                        'hop_count': row[7],
+                        'is_overdue': False,  # Not overdue, just not scheduled yet
+                        'in_queue': in_queue,
+                        'status': 'queued' if in_queue else 'awaiting_queue'
+                    })
+                else:
+                    try:
+                        next_time = datetime.fromisoformat(next_time_str)
+                        minutes_until = int((next_time - now).total_seconds() / 60)
+                        is_overdue = minutes_until < 0
+                        
+                        # Determine status more accurately
+                        if in_queue:
+                            status = 'queued'
+                        elif is_overdue:
+                            # Overdue nodes should be queued by periodic recheck
+                            # Show as "pending" instead of "overdue" to indicate they'll be queued soon
+                            status = 'pending'
+                        else:
+                            status = 'scheduled'
+                        
+                        upcoming.append({
+                            'node_id': node_id,
+                            'short_name': row[1] or node_id[-4:],
+                            'long_name': row[2] or 'Unknown',
+                            'scheduled_time': next_time_str,
+                            'minutes_until': minutes_until,
+                            'last_success': bool(row[4]) if row[4] is not None else None,
+                            'failure_count': row[5] or 0,
+                            'last_seen': row[6],
+                            'hop_count': row[7],
+                            'is_overdue': False,  # Don't show as overdue, show as pending instead
+                            'in_queue': in_queue,
+                            'status': status
+                        })
+                    except Exception as e:
+                        self.logger.error(f"Error parsing next_traceroute_time for {node_id}: {e}")
+            
+            return upcoming
+            
+        except Exception as e:
+            self.logger.error(f"Error getting upcoming traceroutes: {e}", exc_info=True)
+            return []
+    
+    async def _queue_traceroute_now(self, node_id: str) -> Dict[str, Any]:
+        """Manually queue a traceroute for a specific node"""
+        try:
+            self.logger.info(f"Manual traceroute queue request for node {node_id}")
+            
+            # Get traceroute plugin
+            if not hasattr(self, 'plugin_manager') or not self.plugin_manager:
+                return {"success": False, "error": "Plugin manager not available"}
+            
+            plugin_info = self.plugin_manager.get_plugin_info('traceroute_mapper')
+            if not plugin_info or not plugin_info.instance:
+                return {"success": False, "error": "Traceroute mapper plugin not found"}
+            
+            traceroute_plugin = plugin_info.instance
+            
+            if not hasattr(traceroute_plugin, 'priority_queue'):
+                return {"success": False, "error": "Traceroute plugin not properly initialized"}
+            
+            # Check if already in queue
+            if traceroute_plugin.priority_queue.contains(node_id):
+                return {
+                    "success": True,
+                    "message": f"Node {node_id} is already in queue",
+                    "already_queued": True
+                }
+            
+            # Queue the traceroute with manual priority
+            success = traceroute_plugin.priority_queue.enqueue(
+                node_id=node_id,
+                priority=2,  # High priority for manual requests
+                reason="manual_request"
+            )
+            
+            if success:
+                self.logger.info(f"Successfully queued manual traceroute for {node_id}")
+                return {
+                    "success": True,
+                    "message": f"Traceroute queued for node {node_id}",
+                    "already_queued": False
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Failed to queue traceroute (queue may be full)"
+                }
+            
+        except Exception as e:
+            self.logger.error(f"Error queuing manual traceroute: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
+    
+    async def _get_traceroute_stats(self) -> Dict[str, Any]:
+        """Get statistics about traceroute scheduling"""
+        try:
+            from core.database import get_database
+            db = get_database()
+            
+            # Get counts by category
+            stats = {
+                "total_active_nodes": 0,
+                "direct_nodes": 0,
+                "indirect_nodes": 0,
+                "scheduled_nodes": 0,
+                "pending_nodes": 0,
+                "overdue_nodes": 0,
+                "queued_nodes": 0
+            }
+            
+            # Count active nodes (all nodes for now to debug)
+            rows = db.execute_query("""
+                SELECT COUNT(*) FROM users
+            """)
+            stats["total_active_nodes"] = rows[0][0] if rows else 0
+            
+            # Count direct nodes (hop_count < 1, i.e., 0 hops)
+            rows = db.execute_query("""
+                SELECT COUNT(*) FROM users
+                WHERE COALESCE(hop_count, 0) < 1
+            """)
+            stats["direct_nodes"] = rows[0][0] if rows else 0
+            
+            # Count indirect nodes (hop_count >= 1)
+            rows = db.execute_query("""
+                SELECT COUNT(*) FROM users
+                WHERE hop_count >= 1
+            """)
+            stats["indirect_nodes"] = rows[0][0] if rows else 0
+            
+            # Count scheduled nodes
+            rows = db.execute_query("""
+                SELECT COUNT(*) FROM users
+                WHERE next_traceroute_time IS NOT NULL
+                AND next_traceroute_time > datetime('now')
+            """)
+            stats["scheduled_nodes"] = rows[0][0] if rows else 0
+            
+            # Count pending nodes (not scheduled yet, but active and indirect)
+            rows = db.execute_query("""
+                SELECT COUNT(*) FROM users
+                WHERE hop_count >= 1
+                AND next_traceroute_time IS NULL
+                AND last_seen > datetime('now', '-24 hours')
+            """)
+            stats["pending_nodes"] = rows[0][0] if rows else 0
+            
+            # Count overdue nodes
+            rows = db.execute_query("""
+                SELECT COUNT(*) FROM users
+                WHERE next_traceroute_time IS NOT NULL
+                AND next_traceroute_time <= datetime('now')
+            """)
+            stats["overdue_nodes"] = rows[0][0] if rows else 0
+            
+            # Count queued nodes
+            if hasattr(self, 'plugin_manager') and self.plugin_manager:
+                plugin_info = self.plugin_manager.get_plugin_info('traceroute_mapper')
+                if plugin_info and plugin_info.instance:
+                    traceroute_plugin = plugin_info.instance
+                    if hasattr(traceroute_plugin, 'priority_queue'):
+                        stats["queued_nodes"] = traceroute_plugin.priority_queue.size()
+            
+            return stats
+            
+        except Exception as e:
+            self.logger.error(f"Error getting traceroute stats: {e}", exc_info=True)
+            return {
+                "total_active_nodes": 0,
+                "direct_nodes": 0,
+                "indirect_nodes": 0,
+                "scheduled_nodes": 0,
+                "pending_nodes": 0,
+                "overdue_nodes": 0,
+                "queued_nodes": 0,
+                "error": str(e)
+            }
+    
+    def _log_system_event(self, event_type: str, message: str, severity: str = "info", source: str = "system"):
+        """Log a system event to in-memory storage"""
+        try:
+            event = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "type": event_type,
+                "message": message,
+                "severity": severity,  # info, warning, error, success
+                "source": source
+            }
+            
+            # Add to beginning of list
+            self.system_events.insert(0, event)
+            
+            # Trim to max size
+            if len(self.system_events) > self.max_system_events:
+                self.system_events = self.system_events[:self.max_system_events]
+            
+            # Broadcast to WebSocket clients
+            asyncio.create_task(
+                self.websocket_manager.broadcast(
+                    json.dumps({
+                        "type": "system_event",
+                        "data": event
+                    }),
+                    permission_required=Permission.SYSTEM_MONITOR
+                )
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error logging system event: {e}")
+    
+    async def _get_system_events(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Get recent system events"""
+        try:
+            # Return the most recent events up to limit
+            return self.system_events[:limit]
+        except Exception as e:
+            self.logger.error(f"Error getting system events: {e}")
+            return []
+    
     async def initialize(self) -> bool:
         """Initialize the web service"""
         try:
@@ -2802,6 +3194,12 @@ class WebAdminService(BasePlugin):
         try:
             # Start system monitor
             await self.system_monitor.start()
+            
+            # Load nodes from database into system monitor
+            await self._load_nodes_from_database()
+            
+            # Load recent messages from database
+            await self._load_messages_from_database()
             
             # Start scheduler
             await self.scheduler.start()
@@ -2822,11 +3220,184 @@ class WebAdminService(BasePlugin):
             
             self.is_running = True
             self.logger.info(f"Web admin service started on http://{self.host}:{self.port}")
+            
+            # Log system event
+            self._log_system_event(
+                "service_start",
+                f"Web administration service started on {self.host}:{self.port}",
+                "success",
+                "web_admin"
+            )
+            
             return True
             
         except Exception as e:
             self.logger.error(f"Failed to start web admin service: {e}")
             return False
+    
+    async def _load_messages_from_database(self):
+        """Load recent messages from database"""
+        try:
+            from core.database import get_database
+            from models.message import Message, MessageType
+            
+            db = get_database()
+            if not db:
+                self.logger.warning("No database available, skipping message loading")
+                return
+            
+            # Query recent messages (last 100)
+            query = """
+                SELECT message_id, sender_id, recipient_id, channel, content, 
+                       timestamp, hop_count, snr, rssi
+                FROM message_history
+                ORDER BY timestamp DESC
+                LIMIT 100
+            """
+            
+            rows = db.execute_query(query)
+            
+            if rows:
+                for row in rows:
+                    try:
+                        message_id = row[0]
+                        sender_id = row[1]
+                        recipient_id = row[2]
+                        channel = row[3]
+                        content = row[4]
+                        timestamp_str = row[5]
+                        hop_count = row[6] or 0
+                        snr = row[7]
+                        rssi = row[8]
+                        
+                        # Parse timestamp
+                        try:
+                            if timestamp_str:
+                                if 'Z' in timestamp_str or '+' in timestamp_str:
+                                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                                else:
+                                    timestamp = datetime.fromisoformat(timestamp_str).replace(tzinfo=timezone.utc)
+                            else:
+                                timestamp = datetime.now(timezone.utc)
+                        except:
+                            timestamp = datetime.now(timezone.utc)
+                        
+                        # Create Message object
+                        message = Message(
+                            id=message_id,
+                            sender_id=sender_id,
+                            recipient_id=recipient_id,
+                            channel=channel,
+                            content=content,
+                            timestamp=timestamp,
+                            message_type=MessageType.TEXT,
+                            hop_count=hop_count,
+                            snr=snr,
+                            rssi=rssi
+                        )
+                        
+                        # Add to messages cache
+                        self.messages_cache.append(message)
+                        
+                    except Exception as e:
+                        self.logger.debug(f"Error parsing message row: {e}")
+                        continue
+                
+                # Reverse to get chronological order (oldest first)
+                self.messages_cache.reverse()
+                
+                self.logger.info(f"Loaded {len(self.messages_cache)} messages from database")
+            else:
+                self.logger.info("No messages found in database")
+                
+        except Exception as e:
+            self.logger.error(f"Error loading messages from database: {e}", exc_info=True)
+    
+    async def _load_nodes_from_database(self):
+        """Load nodes from database and populate system monitor"""
+        try:
+            from core.database import get_database
+            
+            db = get_database()
+            if not db:
+                self.logger.warning("No database available, skipping node loading")
+                return
+            
+            # Query users table for all nodes
+            query = """
+                SELECT u.node_id, u.short_name, u.long_name, u.last_seen,
+                       h.hardware_model, h.role, h.battery_level, h.voltage, u.hop_count
+                FROM users u
+                LEFT JOIN node_hardware h ON u.node_id = h.node_id
+                WHERE u.node_id IS NOT NULL
+                ORDER BY u.last_seen DESC
+            """
+            
+            rows = db.execute_query(query)
+            
+            if rows:
+                for row in rows:
+                    node_id = row[0]
+                    short_name = row[1] or f"Node-{node_id[-4:]}"
+                    long_name = row[2] or f"Unknown Node {node_id}"
+                    last_seen_str = row[3]
+                    hardware = row[4] or "Unknown"
+                    role = row[5] or "CLIENT"
+                    battery_level = row[6]
+                    voltage = row[7]
+                    hop_count = row[8] or 0
+                    
+                    # Parse last_seen timestamp and ensure it has timezone
+                    try:
+                        if last_seen_str:
+                            # Try parsing with timezone
+                            if 'Z' in last_seen_str or '+' in last_seen_str:
+                                last_seen = datetime.fromisoformat(last_seen_str.replace('Z', '+00:00'))
+                            else:
+                                # No timezone, assume UTC
+                                last_seen = datetime.fromisoformat(last_seen_str).replace(tzinfo=timezone.utc)
+                        else:
+                            last_seen = datetime.now(timezone.utc)
+                    except Exception as e:
+                        self.logger.debug(f"Error parsing last_seen '{last_seen_str}': {e}")
+                        last_seen = datetime.now(timezone.utc)
+                    
+                    # Determine if node is online (seen in last 5 minutes)
+                    time_diff = (datetime.now(timezone.utc) - last_seen).total_seconds()
+                    is_online = time_diff < 300
+                    
+                    # Create NodeStatus object
+                    from services.web.system_monitor import NodeStatus
+                    node_status = NodeStatus(
+                        node_id=node_id,
+                        short_name=short_name,
+                        long_name=long_name,
+                        hardware=hardware,
+                        role=role,
+                        battery_level=battery_level,
+                        voltage=voltage,
+                        last_seen=last_seen,
+                        is_online=is_online,
+                        hops_away=hop_count
+                    )
+                    
+                    # Add to system monitor
+                    self.system_monitor.nodes[node_id] = node_status
+                
+                self.logger.info(f"Loaded {len(rows)} nodes from database into system monitor")
+                
+                # Log system event
+                self._log_system_event(
+                    "nodes_loaded",
+                    f"Loaded {len(rows)} nodes from database",
+                    "info",
+                    "system_monitor"
+                )
+            else:
+                self.logger.info("No nodes found in database")
+                
+        except Exception as e:
+            self.logger.error(f"Error loading nodes from database: {e}", exc_info=True)
     
     async def stop(self) -> bool:
         """Stop the web service"""
@@ -3899,12 +4470,34 @@ class WebAdminService(BasePlugin):
                     success=success
                 )
                 
+                # Log system event
+                if success:
+                    self._log_system_event(
+                        "plugin_restart",
+                        f"Plugin '{plugin_name}' restarted by {username}",
+                        "success",
+                        "plugin_manager"
+                    )
+                else:
+                    self._log_system_event(
+                        "plugin_restart",
+                        f"Failed to restart plugin '{plugin_name}'",
+                        "error",
+                        "plugin_manager"
+                    )
+                
                 return success
             
             return False
             
         except Exception as e:
             self.logger.error(f"Error restarting plugin {plugin_name}: {e}")
+            self._log_system_event(
+                "plugin_restart",
+                f"Error restarting plugin '{plugin_name}': {str(e)}",
+                "error",
+                "plugin_manager"
+            )
             return False
     
     async def _toggle_plugin_enabled(self, plugin_name: str, enabled: bool, username: str, ip_address: str, user_agent: str) -> bool:

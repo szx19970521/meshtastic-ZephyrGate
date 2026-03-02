@@ -25,6 +25,8 @@ class MessageType(Enum):
     IP_TUNNEL = "ip_tunnel"
     SERIAL = "serial"
     STORE_FORWARD = "store_forward"
+    TRACEROUTE = "traceroute"
+    NEIGHBOR_INFO = "neighbor_info"
     UNKNOWN = "unknown"
 
 

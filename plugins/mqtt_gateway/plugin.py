@@ -10,27 +10,20 @@ Version: 1.0.0
 License: GPL-3.0
 """
 
-import sys
 import asyncio
 import logging
-from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-
-# Add src directory to path for imports
-src_path = Path(__file__).parent.parent.parent / "src"
-if str(src_path) not in sys.path:
-    sys.path.insert(0, str(src_path))
 
 from core.enhanced_plugin import EnhancedPlugin
 from core.plugin_manager import PluginMetadata
 from models.message import Message, MessageType
 
 # Import MQTT Gateway components
-from plugins.mqtt_gateway.mqtt_client import MQTTClient
-from plugins.mqtt_gateway.message_formatter import MessageFormatter
-from plugins.mqtt_gateway.message_queue import MessageQueue
-from plugins.mqtt_gateway.rate_limiter import RateLimiter
+from .mqtt_client import MQTTClient
+from .message_formatter import MessageFormatter
+from .message_queue import MessageQueue
+from .rate_limiter import RateLimiter
 
 
 class MQTTGatewayPlugin(EnhancedPlugin):
@@ -136,9 +129,6 @@ class MQTTGatewayPlugin(EnhancedPlugin):
                 logger=self.logger
             )
             self.logger.info(f"Rate limiter initialized (max_rate={max_msgs_per_sec} msg/s)")
-            
-            # Register message handler to receive all mesh messages
-            self.register_message_handler(self._handle_mesh_message, priority=100)
             
             self.initialized = True
             self.logger.info("MQTT Gateway plugin initialized successfully")
@@ -499,6 +489,9 @@ class MQTTGatewayPlugin(EnhancedPlugin):
             self._background_tasks.append(task)
             self.logger.info("Started queue processing background task")
             
+            # Mark plugin as running for health checks
+            self.is_running = True
+            
             self.logger.info("MQTT Gateway plugin started successfully")
             return True
             
@@ -526,6 +519,9 @@ class MQTTGatewayPlugin(EnhancedPlugin):
             
         Requirements: 8.5
         """
+        # Mark plugin as not running
+        self.is_running = False
+        
         # Log shutdown with statistics (Requirement 11.1)
         self.logger.info(
             f"Stopping MQTT Gateway plugin - "
@@ -580,6 +576,28 @@ class MQTTGatewayPlugin(EnhancedPlugin):
                 exc_info=True
             )
             return False
+    
+    async def handle_message(self, message: Message, user: Optional[Any] = None) -> Optional[Any]:
+        """
+        Handle incoming message from the message router.
+        
+        This is the public interface called by the message router to deliver
+        messages to this plugin. It wraps _handle_mesh_message with a simple
+        context dict.
+        
+        Args:
+            message: The message received from the mesh
+            user: Optional user profile (not used by this plugin)
+            
+        Returns:
+            None (this plugin doesn't generate responses)
+        """
+        self.logger.info(f"MQTT Gateway received message: type={message.message_type.value}, id={message.id}, sender={message.sender_id}")
+        context = {
+            'timestamp': datetime.now(datetime.UTC) if hasattr(datetime, 'UTC') else datetime.utcnow(),
+            'plugin_name': self.name
+        }
+        return await self._handle_mesh_message(message, context)
     
     async def _handle_mesh_message(self, message: Message, context: Dict[str, Any]) -> Optional[Any]:
         """
@@ -1041,9 +1059,14 @@ class MQTTGatewayPlugin(EnhancedPlugin):
                 
                 # Update connection status in stats
                 try:
-                    self.stats['connected'] = self.mqtt_client.is_connected() if self.mqtt_client else False
+                    is_conn = self.mqtt_client.is_connected() if self.mqtt_client else False
+                    if self.stats['connected'] != is_conn:
+                        self.logger.info(f"Connection status changed in queue loop: {self.stats['connected']} -> {is_conn}")
+                    self.stats['connected'] = is_conn
                 except Exception as e:
                     self.logger.warning(f"Error checking connection status: {e}")
+                    if self.stats['connected']:
+                        self.logger.info(f"Connection status changed due to error: True -> False")
                     self.stats['connected'] = False
                 
                 # Sleep to avoid busy-waiting
@@ -1098,6 +1121,9 @@ class MQTTGatewayPlugin(EnhancedPlugin):
                 rate_limiter_stats = self.rate_limiter.get_statistics()
             except Exception as e:
                 self.logger.warning(f"Failed to get rate limiter stats: {e}")
+        
+        # Log health check values for debugging
+        self.logger.info(f"Health check: enabled={self.enabled}, initialized={self.initialized}, connected={self.stats['connected']}")
         
         # Build comprehensive health status
         health_status = {

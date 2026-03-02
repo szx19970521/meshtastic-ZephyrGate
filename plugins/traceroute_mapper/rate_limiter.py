@@ -119,11 +119,13 @@ class RateLimiter:
                         f"traceroutes_delayed={self._stats['traceroutes_delayed']}"
                     )
                     
-                    # Log warning if wait time is significant
-                    if wait_time > 60.0:
+                    # Log warning if wait time is significantly longer than expected interval
+                    # Expected interval is 60 / traceroutes_per_minute
+                    expected_interval = 60.0 / self.traceroutes_per_minute if self.traceroutes_per_minute > 0 else 60.0
+                    if wait_time > (expected_interval * 2):
                         self.logger.warning(
                             f"Significant rate limit delay - "
-                            f"wait_time={wait_time:.3f}s, "
+                            f"wait_time={wait_time:.3f}s (expected ~{expected_interval:.1f}s), "
                             f"consider increasing traceroutes_per_minute"
                         )
                     

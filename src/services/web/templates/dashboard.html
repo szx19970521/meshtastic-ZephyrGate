@@ -305,6 +305,79 @@
                         </div>
                     </div>
                 </div>
+                
+                <!-- Traceroute Information -->
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+                    <div class="bg-white p-6 rounded-lg shadow">
+                        <h3 class="text-lg font-semibold mb-4">
+                            <i class="fas fa-route mr-2 text-blue-600"></i>Recent Traceroutes
+                        </h3>
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full table-auto text-sm">
+                                <thead>
+                                    <tr class="bg-gray-50 text-xs">
+                                        <th class="px-3 py-2 text-left">Node ID</th>
+                                        <th class="px-3 py-2 text-left">Name</th>
+                                        <th class="px-3 py-2 text-left">Time</th>
+                                        <th class="px-3 py-2 text-center">Status</th>
+                                        <th class="px-3 py-2 text-center">Hops</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="traceroute-history-tbody">
+                                    <tr>
+                                        <td colspan="5" class="px-4 py-8 text-center text-gray-500">No traceroute history</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    
+                    <div class="bg-white p-6 rounded-lg shadow">
+                        <h3 class="text-lg font-semibold mb-4">
+                            <i class="fas fa-clock mr-2 text-green-600"></i>Upcoming Traceroutes
+                        </h3>
+                        
+                        <!-- Traceroute Statistics -->
+                        <div id="traceroute-stats" class="mb-4 p-3 bg-gray-50 rounded text-sm grid grid-cols-4 gap-2">
+                            <div class="text-center">
+                                <div class="text-gray-600">Active Nodes</div>
+                                <div id="stat-total-nodes" class="text-lg font-semibold">-</div>
+                            </div>
+                            <div class="text-center">
+                                <div class="text-gray-600">Direct (0 hops)</div>
+                                <div id="stat-direct-nodes" class="text-lg font-semibold text-gray-500">-</div>
+                            </div>
+                            <div class="text-center">
+                                <div class="text-gray-600">Indirect (1+ hops)</div>
+                                <div id="stat-indirect-nodes" class="text-lg font-semibold text-blue-600">-</div>
+                            </div>
+                            <div class="text-center">
+                                <div class="text-gray-600">Scheduled</div>
+                                <div id="stat-scheduled-nodes" class="text-lg font-semibold text-green-600">-</div>
+                            </div>
+                        </div>
+                        
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full table-auto text-sm">
+                                <thead>
+                                    <tr class="bg-gray-50 text-xs">
+                                        <th class="px-3 py-2 text-left">Node ID</th>
+                                        <th class="px-3 py-2 text-left">Name</th>
+                                        <th class="px-3 py-2 text-left">Status</th>
+                                        <th class="px-3 py-2 text-left">Time Until</th>
+                                        <th class="px-3 py-2 text-center">Last</th>
+                                        <th class="px-3 py-2 text-center">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="upcoming-traceroutes-tbody">
+                                    <tr>
+                                        <td colspan="6" class="px-4 py-8 text-center text-gray-500">No upcoming traceroutes</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- System Status View -->
@@ -312,7 +385,7 @@
                 <h2 class="text-2xl font-bold mb-6">System Status</h2>
                 
                 <!-- System Metrics -->
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
                     <div class="bg-white p-6 rounded-lg shadow">
                         <div class="flex items-center justify-between">
                             <div>
@@ -340,6 +413,15 @@
                             <i class="fas fa-hdd text-3xl text-purple-500"></i>
                         </div>
                     </div>
+                    <div class="bg-white p-6 rounded-lg shadow">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-gray-500 text-sm">Plugins</p>
+                                <p id="plugin-status" class="text-2xl font-bold">--/--</p>
+                            </div>
+                            <i class="fas fa-plug text-3xl text-orange-500"></i>
+                        </div>
+                    </div>
                 </div>
                 
                 <!-- Service Status -->
@@ -363,12 +445,13 @@
                                     <th class="px-4 py-2 text-left">Name</th>
                                     <th class="px-4 py-2 text-left">Hardware</th>
                                     <th class="px-4 py-2 text-left">Battery</th>
+                                    <th class="px-4 py-2 text-left">Hops</th>
                                     <th class="px-4 py-2 text-left">Last Seen</th>
                                 </tr>
                             </thead>
                             <tbody id="nodes-tbody">
                                 <tr>
-                                    <td colspan="5" class="px-4 py-8 text-center text-gray-500">No nodes found</td>
+                                    <td colspan="6" class="px-4 py-8 text-center text-gray-500">No nodes found</td>
                                 </tr>
                             </tbody>
                         </table>

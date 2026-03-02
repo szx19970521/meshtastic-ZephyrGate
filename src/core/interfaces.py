@@ -345,8 +345,8 @@ class SerialInterface(MeshtasticInterface):
             def text_message_handler(packet, interface=None):
                 self._on_meshtastic_text(packet, interface)
             
-            def nodeinfo_handler(packet, interface=None):
-                self._on_meshtastic_nodeinfo(packet, interface)
+            def user_handler(packet, interface=None):
+                self._on_meshtastic_user(packet, interface)
             
             def position_handler(packet, interface=None):
                 self._on_meshtastic_position(packet, interface)
@@ -356,17 +356,24 @@ class SerialInterface(MeshtasticInterface):
             
             # Store references to prevent garbage collection
             self._text_callback = text_message_handler
-            self._nodeinfo_callback = nodeinfo_handler
+            self._user_callback = user_handler
             self._position_callback = position_handler
             self._telemetry_callback = telemetry_handler
+            self._routing_callback = lambda packet, interface: self._on_meshtastic_routing(packet, interface)
             
             # Subscribe to all relevant packet types
             pub.subscribe(self._text_callback, "meshtastic.receive.text")
-            pub.subscribe(self._nodeinfo_callback, "meshtastic.receive.nodeinfo")
+            pub.subscribe(self._user_callback, "meshtastic.receive.user")
             pub.subscribe(self._position_callback, "meshtastic.receive.position")
             pub.subscribe(self._telemetry_callback, "meshtastic.receive.telemetry")
+            pub.subscribe(self._routing_callback, "meshtastic.receive.routing")
             
-            self.logger.info("Subscribed to meshtastic packet types: text, nodeinfo, position, telemetry")
+            self.logger.info("Subscribed to meshtastic packet types: text, user, position, telemetry, routing")
+            
+            # DISABLED: Don't import node database on startup
+            # This was importing all nodes the device has ever heard (including distant/unreachable ones)
+            # Now we only track nodes that are actively heard via radio
+            # self._import_node_database_sync()
             
             # Test connection
             if self.connection.myInfo:
@@ -393,8 +400,102 @@ class SerialInterface(MeshtasticInterface):
     def _on_meshtastic_text(self, packet, interface=None):
         """Handle incoming text message from Meshtastic"""
         try:
-            self.logger.info(f"📨 Received text message from {packet.get('fromId', 'unknown')}: {packet.get('decoded', {}).get('text', '')}")
-            self.logger.debug(f"Full packet: {packet}")
+            self.logger.debug(f"📨 Received text message from {packet.get('fromId', 'unknown')}: {packet.get('decoded', {}).get('text', '')}")
+            
+            # Continue with existing text message handling...
+            node_id = packet.get('fromId', '')
+            if not node_id:
+                return
+            
+            decoded = packet.get('decoded', {})
+            text = decoded.get('text', '')
+            
+            # Update node tracking
+            self._update_node_from_packet(packet)
+            
+            # Create Message object and route to message router
+            from models.message import Message, MessageType, MessagePriority
+            message = Message(
+                sender_id=node_id,
+                recipient_id=packet.get('toId', 'broadcast'),
+                channel=packet.get('channel', 0),
+                content=text,
+                message_type=MessageType.TEXT,
+                priority=MessagePriority.NORMAL,
+                hop_count=max(0, packet.get('hopStart', 0) - packet.get('hopLimit', 0)),
+                snr=packet.get('rxSnr'),
+                rssi=packet.get('rxRssi'),
+                metadata={'raw_packet': packet}
+            )
+            self._handle_received_message(message)
+            
+        except Exception as e:
+            self.logger.error(f"Error processing text message: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+    
+    def _import_node_database_sync(self):
+        """Import existing node information from Meshtastic device"""
+        try:
+            if not self.connection:
+                return
+            
+            self.logger.info("Importing node database from Meshtastic device...")
+            
+            # Access the node database from the Meshtastic connection
+            nodes = getattr(self.connection, 'nodes', {})
+            
+            if not nodes:
+                self.logger.warning("No nodes found in Meshtastic device database")
+                return
+            
+            imported_count = 0
+            for node_id, node_info in nodes.items():
+                try:
+                    # Get user info from node
+                    user = node_info.get('user', {})
+                    
+                    if not user:
+                        continue
+                    
+                    # Create a synthetic packet to update the database
+                    synthetic_packet = {
+                        'fromId': node_id,
+                        'toId': 'broadcast',
+                        'channel': 0,
+                        'decoded': {
+                            'user': {
+                                'shortName': user.get('shortName', node_id[-4:]),
+                                'longName': user.get('longName', 'Unknown'),
+                                'hwModel': user.get('hwModel', ''),
+                                'role': user.get('role', 'CLIENT')
+                            }
+                        },
+                        'rxSnr': node_info.get('snr'),
+                        'rxRssi': node_info.get('rssi'),
+                        'hopStart': 0,
+                        'hopLimit': 0
+                    }
+                    
+                    # Update database with this node's info
+                    self._update_node_from_packet(synthetic_packet, user_info=synthetic_packet['decoded']['user'])
+                    imported_count += 1
+                    
+                    self.logger.debug(
+                        f"Imported node {node_id}: "
+                        f"{user.get('shortName', 'unknown')} / {user.get('longName', 'Unknown')}"
+                    )
+                    
+                except Exception as e:
+                    self.logger.error(f"Error importing node {node_id}: {e}")
+                    continue
+            
+            self.logger.info(f"Successfully imported {imported_count} nodes from Meshtastic device")
+            
+        except Exception as e:
+            self.logger.error(f"Error importing node database: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             
             # Convert Meshtastic packet to our Message format
             try:
@@ -409,7 +510,7 @@ class SerialInterface(MeshtasticInterface):
                 content=packet.get('decoded', {}).get('text', ''),
                 message_type=MessageType.TEXT,
                 interface_id=self.config.id,
-                hop_count=packet.get('hopStart', 0) - packet.get('hopLimit', 0),
+                hop_count=max(0, packet.get('hopStart', 0) - packet.get('hopLimit', 0)),
                 snr=packet.get('rxSnr'),
                 rssi=packet.get('rxRssi')
             )
@@ -427,21 +528,44 @@ class SerialInterface(MeshtasticInterface):
             import traceback
             self.logger.error(traceback.format_exc())
     
-    def _on_meshtastic_nodeinfo(self, packet, interface=None):
-        """Handle incoming node info packet from Meshtastic"""
+    def _on_meshtastic_user(self, packet, interface=None):
+        """Handle incoming user info packet from Meshtastic (nodeinfo)"""
         try:
             node_id = packet.get('fromId', '')
+            
+            # Skip if no valid sender
+            if not node_id:
+                self.logger.debug(f"Received USER packet without sender ID, skipping")
+                return
+            
             decoded = packet.get('decoded', {})
             user_info = decoded.get('user', {})
             
-            self.logger.info(f"📡 Received NODEINFO from {node_id}: {user_info.get('shortName', 'unknown')}")
-            self.logger.debug(f"Full nodeinfo packet: {packet}")
+            self.logger.debug(
+                f"📡 User info from {node_id}: "
+                f"{user_info.get('shortName', 'unknown')} / "
+                f"{user_info.get('longName', 'unknown')} "
+                f"({user_info.get('hwModel', 'unknown')})"
+            )
             
             # Update node tracking with hardware info
             self._update_node_from_packet(packet, user_info=user_info)
             
+            # Create Message object and route to message router
+            from models.message import Message, MessageType, MessagePriority
+            message = Message(
+                sender_id=node_id,
+                recipient_id=packet.get('toId', 'broadcast'),
+                channel=packet.get('channel', 0),
+                content="",  # USER has no text content
+                message_type=MessageType.NODEINFO,
+                priority=MessagePriority.NORMAL,
+                metadata={'raw_packet': packet}
+            )
+            self._handle_received_message(message)
+            
         except Exception as e:
-            self.logger.error(f"Error processing nodeinfo packet: {e}")
+            self.logger.error(f"Error processing user packet: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
     
@@ -449,6 +573,12 @@ class SerialInterface(MeshtasticInterface):
         """Handle incoming position packet from Meshtastic"""
         try:
             node_id = packet.get('fromId', '')
+            
+            # Skip if no valid sender
+            if not node_id:
+                self.logger.debug(f"Received POSITION packet without sender ID, skipping")
+                return
+            
             decoded = packet.get('decoded', {})
             position = decoded.get('position', {})
             
@@ -457,11 +587,23 @@ class SerialInterface(MeshtasticInterface):
                 lon = position.get('longitude')
                 alt = position.get('altitude')
                 
-                self.logger.info(f"📍 Received POSITION from {node_id}: lat={lat}, lon={lon}, alt={alt}")
-                self.logger.debug(f"Full position packet: {packet}")
+                self.logger.debug(f"Position from {node_id}: lat={lat}, lon={lon}, alt={alt}")
                 
                 # Update node tracking with position
                 self._update_node_from_packet(packet, position=position)
+                
+                # Create Message object and route to message router
+                from models.message import Message, MessageType, MessagePriority
+                message = Message(
+                    sender_id=node_id,
+                    recipient_id=packet.get('toId', 'broadcast'),
+                    channel=packet.get('channel', 0),
+                    content="",  # POSITION has no text content
+                    message_type=MessageType.POSITION,
+                    priority=MessagePriority.NORMAL,
+                    metadata={'raw_packet': packet, 'position': position}
+                )
+                self._handle_received_message(message)
             
         except Exception as e:
             self.logger.error(f"Error processing position packet: {e}")
@@ -472,6 +614,12 @@ class SerialInterface(MeshtasticInterface):
         """Handle incoming telemetry packet from Meshtastic"""
         try:
             node_id = packet.get('fromId', '')
+            
+            # Skip if no valid sender
+            if not node_id:
+                self.logger.debug(f"Received TELEMETRY packet without sender ID, skipping")
+                return
+            
             decoded = packet.get('decoded', {})
             telemetry = decoded.get('telemetry', {})
             
@@ -480,14 +628,149 @@ class SerialInterface(MeshtasticInterface):
                 battery = device_metrics.get('batteryLevel')
                 voltage = device_metrics.get('voltage')
                 
-                self.logger.info(f"🔋 Received TELEMETRY from {node_id}: battery={battery}%, voltage={voltage}V")
-                self.logger.debug(f"Full telemetry packet: {packet}")
+                self.logger.debug(f"Telemetry from {node_id}: battery={battery}%, voltage={voltage}V")
                 
                 # Update node tracking with telemetry
                 self._update_node_from_packet(packet, telemetry=device_metrics)
+                
+                # Create Message object and route to message router
+                from models.message import Message, MessageType, MessagePriority
+                message = Message(
+                    sender_id=node_id,
+                    recipient_id=packet.get('toId', 'broadcast'),
+                    channel=packet.get('channel', 0),
+                    content="",  # TELEMETRY has no text content
+                    message_type=MessageType.TELEMETRY,
+                    priority=MessagePriority.NORMAL,
+                    metadata={'raw_packet': packet, 'telemetry': device_metrics}
+                )
+                self._handle_received_message(message)
             
         except Exception as e:
             self.logger.error(f"Error processing telemetry packet: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+    
+    def _on_meshtastic_routing(self, packet, interface=None):
+        """Handle incoming routing packet from Meshtastic (traceroute, neighbor_info)"""
+        try:
+            node_id = packet.get('fromId', '')
+            
+            # Skip if no valid sender
+            if not node_id:
+                self.logger.debug(f"Received ROUTING packet without sender ID, skipping")
+                return
+            
+            decoded = packet.get('decoded', {})
+            routing = decoded.get('routing', {})
+            
+            # Check if there's a 'payload' field that might contain the RouteDiscovery protobuf
+            if 'payload' in decoded:
+                payload = decoded.get('payload')
+                if payload:
+                    # Try to decode as RouteDiscovery protobuf
+                    try:
+                        from meshtastic.protobuf import mesh_pb2
+                        route_discovery = mesh_pb2.RouteDiscovery()
+                        route_discovery.ParseFromString(payload)
+                        route_list = list(route_discovery.route)
+                        route_back_list = list(route_discovery.route_back)
+                        
+                        # Add the decoded route to routing dict
+                        if not routing:
+                            routing = {}
+                        
+                        # Check if this has actual route data
+                        if route_list or route_back_list:
+                            routing['route'] = route_list
+                            routing['route_back'] = route_back_list
+                            # Only log actual traceroute responses with data
+                            self.logger.info(f"🗺️  Traceroute response from {node_id}: route={route_list}, route_back={route_back_list}")
+                        else:
+                            # Empty route - likely an ACK
+                            routing['route'] = route_list
+                            routing['route_back'] = route_back_list
+                            
+                    except Exception as e:
+                        self.logger.debug(f"Failed to decode RouteDiscovery: {e}")
+            
+            if routing:
+                # Determine if this is a traceroute or neighbor_info
+                if 'route' in routing or 'routeReply' in routing:
+                    # This is a traceroute message
+                    route = routing.get('route') or routing.get('routeReply', [])
+                    route_back = routing.get('route_back', [])
+                    error_reason = routing.get('errorReason', 'UNKNOWN')
+                    to_id = packet.get('toId', '')
+                    
+                    if route or route_back:
+                        # Has route data - definitely a traceroute response
+                        message_type_val = MessageType.TRACEROUTE
+                        metadata = {
+                            'raw_packet': packet,
+                            'routing': routing,
+                            'traceroute': True,
+                            'route': route,
+                            'route_back': route_back,
+                            'request_id': decoded.get('requestId'),
+                            'error_reason': error_reason
+                        }
+                    elif error_reason == 'NONE' and to_id and to_id != 'broadcast' and node_id != to_id:
+                        # Empty route but no error - likely a direct node (0 hops)
+                        self.logger.info(f"🗺️  Traceroute response from {node_id}: DIRECT NODE (0 hops)")
+                        message_type_val = MessageType.TRACEROUTE
+                        metadata = {
+                            'raw_packet': packet,
+                            'routing': routing,
+                            'traceroute': True,
+                            'route': route,
+                            'route_back': route_back,
+                            'request_id': decoded.get('requestId'),
+                            'error_reason': error_reason,
+                            'direct_node': True
+                        }
+                    else:
+                        # ACK or error - use DEBUG level
+                        self.logger.debug(f"Routing ACK/ERROR from {node_id}: errorReason={error_reason}")
+                        message_type_val = MessageType.ROUTING
+                        metadata = {
+                            'raw_packet': packet,
+                            'routing': routing,
+                            'traceroute_ack': True,
+                            'error_reason': error_reason,
+                            'request_id': decoded.get('requestId')
+                        }
+                elif 'neighbors' in routing or 'neighborInfo' in routing:
+                    # This is a neighbor info message
+                    neighbors = routing.get('neighbors') or routing.get('neighborInfo', [])
+                    self.logger.info(f"👥 Neighbor info from {node_id}: {len(neighbors)} neighbors")
+                    message_type_val = MessageType.NEIGHBOR_INFO
+                    metadata = {
+                        'raw_packet': packet,
+                        'routing': routing,
+                        'neighbors': neighbors
+                    }
+                else:
+                    # Generic routing message - DEBUG level
+                    self.logger.debug(f"Generic routing from {node_id}")
+                    message_type_val = MessageType.ROUTING
+                    metadata = {'raw_packet': packet, 'routing': routing}
+                
+                # Create Message object and route to message router
+                from models.message import Message, MessagePriority
+                message = Message(
+                    sender_id=node_id,
+                    recipient_id=packet.get('toId', 'broadcast'),
+                    channel=packet.get('channel', 0),
+                    content="",  # ROUTING has no text content
+                    message_type=message_type_val,
+                    priority=MessagePriority.NORMAL,
+                    metadata=metadata
+                )
+                self._handle_received_message(message)
+            
+        except Exception as e:
+            self.logger.error(f"Error processing routing packet: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
     
@@ -499,6 +782,17 @@ class SerialInterface(MeshtasticInterface):
             
             node_id = packet.get('fromId', '')
             if not node_id:
+                return
+            
+            # Filter out invalid/special node IDs
+            # Valid node IDs start with '!' followed by 8 hex characters
+            if not node_id.startswith('!') or len(node_id) != 9:
+                self.logger.debug(f"Skipping invalid node ID: {node_id}")
+                return
+            
+            # Filter out special broadcast addresses
+            if node_id in ['!ffffffff', '^all', 'broadcast']:
+                self.logger.debug(f"Skipping broadcast address: {node_id}")
                 return
             
             db = get_database()
@@ -530,7 +824,7 @@ class SerialInterface(MeshtasticInterface):
             # Add signal quality
             user_data['snr'] = packet.get('rxSnr')
             user_data['rssi'] = packet.get('rxRssi')
-            user_data['hop_count'] = packet.get('hopStart', 0) - packet.get('hopLimit', 0)
+            user_data['hop_count'] = max(0, packet.get('hopStart', 0) - packet.get('hopLimit', 0))
             
             # Add telemetry if available
             if telemetry:
@@ -589,9 +883,9 @@ class SerialInterface(MeshtasticInterface):
                     pub.unsubscribe(self._text_callback, "meshtastic.receive.text")
                     self._text_callback = None
                 
-                if hasattr(self, '_nodeinfo_callback') and self._nodeinfo_callback:
-                    pub.unsubscribe(self._nodeinfo_callback, "meshtastic.receive.nodeinfo")
-                    self._nodeinfo_callback = None
+                if hasattr(self, '_user_callback') and self._user_callback:
+                    pub.unsubscribe(self._user_callback, "meshtastic.receive.user")
+                    self._user_callback = None
                 
                 if hasattr(self, '_position_callback') and self._position_callback:
                     pub.unsubscribe(self._position_callback, "meshtastic.receive.position")
@@ -600,6 +894,10 @@ class SerialInterface(MeshtasticInterface):
                 if hasattr(self, '_telemetry_callback') and self._telemetry_callback:
                     pub.unsubscribe(self._telemetry_callback, "meshtastic.receive.telemetry")
                     self._telemetry_callback = None
+                
+                if hasattr(self, '_routing_callback') and self._routing_callback:
+                    pub.unsubscribe(self._routing_callback, "meshtastic.receive.routing")
+                    self._routing_callback = None
                 
                 self.logger.info("Unsubscribed from all meshtastic packet types")
                 
@@ -619,8 +917,30 @@ class SerialInterface(MeshtasticInterface):
             return False
         
         try:
-            # Convert our message to meshtastic format
-            self.logger.info(f"Calling sendText with content='{message.content[:50]}...', destinationId={message.recipient_id}, channelIndex={message.channel}")
+            # For traceroute messages, use sendTraceRoute method
+            if message.message_type == MessageType.ROUTING and message.metadata.get('traceroute'):
+                hop_limit = message.hop_limit if message.hop_limit is not None else 7
+                self.logger.info(f"Sending traceroute to {message.recipient_id} (hop_limit={hop_limit})")
+                
+                # Use the proper sendTraceRoute method which handles the protocol correctly
+                self.connection.sendTraceRoute(
+                    dest=message.recipient_id,
+                    hopLimit=hop_limit,
+                    channelIndex=message.channel
+                )
+                
+                # Note: The Meshtastic library prints traceroute results to stdout
+                # but doesn't publish them through pubsub in a parseable way.
+                # The actual route data appears in the console output like:
+                # "Route traced towards destination: nodeA --> nodeB --> nodeC"
+                # We would need to capture stdout or parse the node database to get this data.
+                # For now, the traceroute IS working (you can see it in logs), but we can't
+                # programmatically capture the route for processing.
+                
+                return True
+            
+            # For regular text messages, use sendText
+            self.logger.info(f"Calling sendText with content='{message.content[:50] if message.content else ''}...', destinationId={message.recipient_id}, channelIndex={message.channel}")
             
             # Prepare sendText parameters
             send_params = {
@@ -629,10 +949,10 @@ class SerialInterface(MeshtasticInterface):
                 'channelIndex': message.channel
             }
             
-            # Add hop limit if specified (None = use device default, typically 3)
+            # Note: sendText doesn't support hopLimit parameter
+            # Hop limit must be set via device config or will use default (3)
             if message.hop_limit is not None:
-                send_params['hopLimit'] = message.hop_limit
-                self.logger.info(f"Using hop limit: {message.hop_limit}")
+                self.logger.warning(f"Hop limit {message.hop_limit} requested but sendText doesn't support hopLimit parameter - using device default")
             
             self.connection.sendText(**send_params)
             self.logger.info(f"sendText completed successfully")
@@ -704,16 +1024,41 @@ class TCPInterface(MeshtasticInterface):
             return False
         
         try:
-            # Convert our message to meshtastic format
+            # For traceroute messages, use sendData with TRACEROUTE_APP port
+            if message.message_type == MessageType.ROUTING and message.metadata.get('traceroute'):
+                self.logger.info(f"Sending traceroute request to {message.recipient_id} with hop_limit={message.hop_limit}")
+                
+                # Import protobuf definitions
+                from meshtastic.protobuf import portnums_pb2, mesh_pb2
+                
+                # Create RouteDiscovery protobuf message
+                route_discovery = mesh_pb2.RouteDiscovery()
+                
+                # Serialize the protobuf
+                payload = route_discovery.SerializeToString()
+                
+                # Send using sendData with TRACEROUTE_APP port
+                self.connection.sendData(
+                    payload,
+                    destinationId=message.recipient_id,
+                    portNum=portnums_pb2.PortNum.TRACEROUTE_APP,
+                    wantAck=True,
+                    wantResponse=True,
+                    channelIndex=message.channel
+                )
+                self.logger.info(f"Traceroute request sent successfully")
+                return True
+            
+            # For regular text messages, use sendText
             send_params = {
                 'text': message.content,
                 'destinationId': message.recipient_id,
                 'channelIndex': message.channel
             }
             
-            # Add hop limit if specified
+            # Note: sendText doesn't support hopLimit parameter
             if message.hop_limit is not None:
-                send_params['hopLimit'] = message.hop_limit
+                self.logger.warning(f"Hop limit {message.hop_limit} requested but sendText doesn't support hopLimit parameter - using device default")
             
             self.connection.sendText(**send_params)
             return True
@@ -783,16 +1128,41 @@ class BLEInterface(MeshtasticInterface):
             return False
         
         try:
-            # Convert our message to meshtastic format
+            # For traceroute messages, use sendData with TRACEROUTE_APP port
+            if message.message_type == MessageType.ROUTING and message.metadata.get('traceroute'):
+                self.logger.info(f"Sending traceroute request to {message.recipient_id} with hop_limit={message.hop_limit}")
+                
+                # Import protobuf definitions
+                from meshtastic.protobuf import portnums_pb2, mesh_pb2
+                
+                # Create RouteDiscovery protobuf message
+                route_discovery = mesh_pb2.RouteDiscovery()
+                
+                # Serialize the protobuf
+                payload = route_discovery.SerializeToString()
+                
+                # Send using sendData with TRACEROUTE_APP port
+                self.connection.sendData(
+                    payload,
+                    destinationId=message.recipient_id,
+                    portNum=portnums_pb2.PortNum.TRACEROUTE_APP,
+                    wantAck=True,
+                    wantResponse=True,
+                    channelIndex=message.channel
+                )
+                self.logger.info(f"Traceroute request sent successfully")
+                return True
+            
+            # For regular text messages, use sendText
             send_params = {
                 'text': message.content,
                 'destinationId': message.recipient_id,
                 'channelIndex': message.channel
             }
             
-            # Add hop limit if specified
+            # Note: sendText doesn't support hopLimit parameter
             if message.hop_limit is not None:
-                send_params['hopLimit'] = message.hop_limit
+                self.logger.warning(f"Hop limit {message.hop_limit} requested but sendText doesn't support hopLimit parameter - using device default")
             
             self.connection.sendText(**send_params)
             return True

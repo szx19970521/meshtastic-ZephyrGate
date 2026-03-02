@@ -129,16 +129,17 @@ class TracerouteManager:
         priority: int = 8,
         max_hops: Optional[int] = None,
         timeout_seconds: Optional[int] = None,
-        max_retries: Optional[int] = None
+        max_retries: Optional[int] = None,
+        meshtastic_interface: Optional[Any] = None
     ) -> str:
         """
-        Create and send a traceroute request to a target node.
+        Send a traceroute request using the native meshtastic library method.
         
-        Creates a Meshtastic-compliant traceroute request message with:
-        - MessageType.ROUTING (TRACEROUTE_APP in Meshtastic)
-        - hop_limit set to max_hops
-        - want_response flag set to true in metadata
-        - route_discovery flag set to true in metadata
+        Uses the meshtastic library's built-in sendTraceRoute() method which:
+        - Creates a proper RouteDiscovery protobuf
+        - Sends with TRACEROUTE_APP port number
+        - Handles response callbacks automatically
+        - Provides SNR data for each hop
         
         Args:
             node_id: Target node ID to traceroute
@@ -146,14 +147,15 @@ class TracerouteManager:
             max_hops: Maximum hops (uses default if None)
             timeout_seconds: Timeout duration (uses default if None)
             max_retries: Maximum retries (uses default if None)
+            meshtastic_interface: The meshtastic interface connection object
         
         Returns:
             request_id: Unique identifier for this traceroute request
         
         Requirements:
             - 6.1: Set hop_limit to configured max_hops
-            - 18.1: Use MessageType.ROUTING (TRACEROUTE_APP)
-            - 18.2: Set want_response flag to true
+            - 18.1: Use native sendTraceRoute (TRACEROUTE_APP)
+            - 18.2: Response handling via pubsub
             - 18.3: Include destination node_id and max_hops
         """
         # Generate unique request ID
@@ -167,22 +169,6 @@ class TracerouteManager:
         # Calculate timeout timestamp
         sent_at = datetime.utcnow()
         timeout_at = sent_at + timedelta(seconds=timeout)
-        
-        # Create Meshtastic-compliant traceroute request
-        message = Message(
-            id=request_id,
-            recipient_id=node_id,
-            message_type=MessageType.ROUTING,  # TRACEROUTE_APP in Meshtastic
-            content="",  # Empty content for traceroute
-            hop_limit=hops,  # Set max hops for traceroute
-            priority=MessagePriority.NORMAL,
-            metadata={
-                'want_response': True,  # Request response from destination
-                'route_discovery': True,  # Enable route discovery
-                'request_id': request_id,  # Track this request
-                'traceroute': True  # Mark as traceroute message
-            }
-        )
         
         # Track pending traceroute
         pending = PendingTraceroute(
@@ -206,10 +192,28 @@ class TracerouteManager:
             f"timeout={timeout}s, priority={priority})"
         )
         
-        # Note: The actual sending of the message to the Meshtastic interface
-        # will be handled by the plugin's message routing system.
-        # This method creates the message and tracks it as pending.
-        # The plugin will need to retrieve this message and send it.
+        # Send using native meshtastic method if interface provided
+        if meshtastic_interface and hasattr(meshtastic_interface, 'sendTraceRoute'):
+            try:
+                # The meshtastic library's sendTraceRoute method handles:
+                # - Creating the RouteDiscovery protobuf
+                # - Setting the correct port number (TRACEROUTE_APP)
+                # - Sending with wantResponse=True
+                # - Response callback registration
+                meshtastic_interface.sendTraceRoute(
+                    dest=node_id,
+                    hopLimit=hops,
+                    channelIndex=0
+                )
+                self.logger.debug(f"Called native sendTraceRoute for {node_id}")
+            except Exception as e:
+                self.logger.error(f"Failed to send traceroute via native method: {e}")
+                # Don't raise - let the timeout handler deal with it
+        else:
+            self.logger.warning(
+                f"Meshtastic interface not available or doesn't support sendTraceRoute. "
+                f"Traceroute request {request_id} tracked but not sent."
+            )
         
         return request_id
     
@@ -224,40 +228,6 @@ class TracerouteManager:
             PendingTraceroute object if found, None otherwise
         """
         return self._pending_traceroutes.get(request_id)
-    
-    def get_pending_traceroute_message(self, request_id: str) -> Optional[Message]:
-        """
-        Get the message for a pending traceroute request.
-        
-        This method allows the plugin to retrieve the message that needs to be sent.
-        
-        Args:
-            request_id: The request ID returned by send_traceroute()
-        
-        Returns:
-            Message object if request is pending, None otherwise
-        """
-        pending = self._pending_traceroutes.get(request_id)
-        if not pending:
-            return None
-        
-        # Recreate the message from the pending traceroute
-        message = Message(
-            id=request_id,
-            recipient_id=pending.node_id,
-            message_type=MessageType.ROUTING,
-            content="",
-            hop_limit=self.max_hops,
-            priority=MessagePriority.NORMAL,
-            metadata={
-                'want_response': True,
-                'route_discovery': True,
-                'request_id': request_id,
-                'traceroute': True
-            }
-        )
-        
-        return message
     
     def is_pending(self, request_id: str) -> bool:
         """
@@ -384,17 +354,51 @@ class TracerouteManager:
         
         # Extract request_id from metadata
         request_id = message.metadata.get('request_id')
-        if not request_id:
-            self.logger.warning(
-                f"Traceroute response from {message.sender_id} missing request_id"
-            )
-            return None
         
-        # Find the pending traceroute
-        pending = self._pending_traceroutes.get(request_id)
+        # Find the pending traceroute by request_id OR by checking all pending for this sender
+        pending = None
+        
+        if request_id:
+            pending = self._pending_traceroutes.get(request_id)
+        
+        # If not found by request_id, try to match by checking if we have a pending request
+        # for the node that this response is about (for direct node responses from local node)
+        if not pending:
+            # For direct node responses, the sender is our local node responding about another node
+            # We need to find which pending request this response is for
+            # Check if this is a direct node response (empty route from local node)
+            is_direct = message.metadata.get('direct_node', False)
+            route = message.metadata.get('route', [])
+            
+            if is_direct or (not route and message.sender_id):
+                # This is a response from our local node about a traceroute
+                # The response is FROM our local node, but ABOUT the destination we were tracing
+                # We need to match by finding the most recent pending request
+                # Look through all pending requests to find the most recent one
+                most_recent_pending = None
+                most_recent_time = None
+                
+                for pid, p in list(self._pending_traceroutes.items()):
+                    # Match if the pending request is recent (within last 10 seconds)
+                    age = (datetime.utcnow() - p.sent_at).total_seconds()
+                    if age < 10.0:  # Match requests within last 10 seconds
+                        if most_recent_time is None or p.sent_at > most_recent_time:
+                            most_recent_pending = p
+                            most_recent_time = p.sent_at
+                            request_id = pid
+                
+                if most_recent_pending:
+                    pending = most_recent_pending
+                    age = (datetime.utcnow() - pending.sent_at).total_seconds()
+                    self.logger.info(
+                        f"Matched traceroute response from {message.sender_id} to pending request "
+                        f"for {pending.node_id} (age={age:.1f}s, matched as most recent pending)"
+                    )
+        
         if not pending:
             self.logger.debug(
-                f"Received traceroute response for unknown request {request_id}"
+                f"Received traceroute response for unknown request (request_id={request_id}, "
+                f"sender={message.sender_id})"
             )
             return None
         

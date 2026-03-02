@@ -465,6 +465,29 @@ class DatabaseManager:
                 -- Create index for last_seen to improve stats queries
                 CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users (last_seen);
                 """
+            ),
+            Migration(
+                version=9,
+                name="add_traceroute_scheduling",
+                sql="""
+                -- Add traceroute scheduling fields to users table
+                ALTER TABLE users ADD COLUMN next_traceroute_time DATETIME;
+                ALTER TABLE users ADD COLUMN last_traceroute_time DATETIME;
+                ALTER TABLE users ADD COLUMN last_traceroute_success BOOLEAN;
+                ALTER TABLE users ADD COLUMN traceroute_failure_count INTEGER DEFAULT 0;
+                
+                -- Create index for next_traceroute_time to improve scheduling queries
+                CREATE INDEX idx_users_next_traceroute ON users (next_traceroute_time);
+                """
+            ),
+            Migration(
+                version=10,
+                name="fix_negative_hop_counts",
+                sql="""
+                -- Fix any negative hop counts in the database
+                UPDATE users SET hop_count = 0 WHERE hop_count < 0;
+                UPDATE message_history SET hop_count = 0 WHERE hop_count < 0;
+                """
             )
         ]
     
