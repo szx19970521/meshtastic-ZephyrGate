@@ -25,34 +25,24 @@ class ZephyrGateDashboard {
     }
     
     async checkUserRole() {
-        try {
-            const response = await this.apiRequest('/api/auth/profile');
-            if (response.ok) {
-                const profile = await response.json();
-                this.userRole = profile.role;
-                console.log('User role detected:', this.userRole);
-                
-                // Hide admin-only features for non-admin users
-                if (this.userRole !== 'admin') {
-                    console.log('Hiding admin-only features for non-admin user');
-                    document.querySelectorAll('[data-admin-only="true"]').forEach(el => {
-                        console.log('Hiding element:', el);
-                        el.style.display = 'none';
-                    });
-                }
-                
-                // Hide operator features for viewers
-                if (this.userRole === 'viewer') {
-                    console.log('Hiding operator-only features for viewer');
-                    document.querySelectorAll('[data-operator-only="true"]').forEach(el => {
-                        el.style.display = 'none';
-                    });
-                }
-            } else {
-                console.warn('Failed to get user profile, status:', response.status);
-            }
-        } catch (error) {
-            console.error('Error checking user role:', error);
+        // Get role from localStorage (set during login) or default to admin
+        this.userRole = localStorage.getItem('zephyr_role') || this.userRole || 'admin';
+        console.log('User role:', this.userRole);
+        
+        // Hide admin-only features for non-admin users
+        if (this.userRole !== 'admin') {
+            console.log('Hiding admin-only features for non-admin user');
+            document.querySelectorAll('[data-admin-only="true"]').forEach(el => {
+                el.style.display = 'none';
+            });
+        }
+        
+        // Hide operator features for viewers
+        if (this.userRole === 'viewer') {
+            console.log('Hiding operator-only features for viewer');
+            document.querySelectorAll('[data-operator-only="true"]').forEach(el => {
+                el.style.display = 'none';
+            });
         }
     }
     
@@ -190,10 +180,12 @@ class ZephyrGateDashboard {
             if (response.ok) {
                 const data = await response.json();
                 this.token = data.access_token;
+                this.userRole = data.role || 'admin'; // Get role from login response
                 localStorage.setItem('zephyr_token', this.token);
+                localStorage.setItem('zephyr_role', this.userRole); // Store role
                 
                 this.hideLoginPage();
-                await this.checkUserRole(); // Check role and hide admin-only features
+                await this.checkUserRole(); // Apply role-based UI restrictions
                 this.loadUserProfile();
                 this.loadDashboardData();
                 this.setupWebSocket();
@@ -208,7 +200,9 @@ class ZephyrGateDashboard {
     
     logout() {
         this.token = null;
+        this.userRole = null;
         localStorage.removeItem('zephyr_token');
+        localStorage.removeItem('zephyr_role');
         
         if (this.websocket) {
             this.websocket.close();
@@ -220,14 +214,10 @@ class ZephyrGateDashboard {
     }
     
     async loadUserProfile() {
-        try {
-            const response = await this.apiRequest('/api/auth/profile');
-            if (response.ok) {
-                const profile = await response.json();
-                document.getElementById('username').textContent = profile.username;
-            }
-        } catch (error) {
-            console.error('Failed to load user profile:', error);
+        // Profile feature removed - set default username
+        const usernameEl = document.getElementById('username');
+        if (usernameEl) {
+            usernameEl.textContent = 'Admin';
         }
     }
     
@@ -254,8 +244,8 @@ class ZephyrGateDashboard {
                 this.updateRecentMessages(messages);
             }
             
-            // DISABLED: Load traceroute data - causes too many DB queries
-            // await this.loadTracerouteData();
+            // Load traceroute data
+            await this.loadTracerouteData();
             
             // Load system events
             const eventsResponse = await this.apiRequest('/api/system/events?limit=10');
@@ -273,6 +263,18 @@ class ZephyrGateDashboard {
     
     async loadTracerouteData() {
         try {
+            // Load traceroute plugin health status
+            const healthResponse = await this.apiRequest('/api/plugins/traceroute_mapper');
+            if (healthResponse.ok) {
+                const pluginData = await healthResponse.json();
+                console.log('Traceroute plugin data loaded:', pluginData);
+                
+                // Get health status if available
+                if (pluginData.health_status) {
+                    this.updateTracerouteHealthStatus(pluginData.health_status);
+                }
+            }
+            
             // Load traceroute statistics
             const statsResponse = await this.apiRequest('/api/traceroute/stats');
             if (statsResponse.ok) {
@@ -293,8 +295,8 @@ class ZephyrGateDashboard {
                 console.error('Failed to load traceroute history:', historyResponse.status, historyResponse.statusText);
             }
             
-            // Load upcoming traceroutes
-            const upcomingResponse = await this.apiRequest('/api/traceroute/upcoming?limit=10');
+            // Load upcoming traceroutes (show all indirect nodes)
+            const upcomingResponse = await this.apiRequest('/api/traceroute/upcoming?limit=100');
             if (upcomingResponse.ok) {
                 const upcoming = await upcomingResponse.json();
                 console.log('Upcoming traceroutes loaded:', upcoming);
@@ -304,6 +306,52 @@ class ZephyrGateDashboard {
             }
         } catch (error) {
             console.error('Failed to load traceroute data:', error);
+        }
+    }
+    
+    updateTracerouteHealthStatus(healthStatus) {
+        const healthContainer = document.getElementById('traceroute-health-status');
+        const emergencyStopAlert = document.getElementById('emergency-stop-alert');
+        const congestionAlert = document.getElementById('congestion-alert');
+        const quietHoursAlert = document.getElementById('quiet-hours-alert');
+        const currentRateEl = document.getElementById('current-rate');
+        const baseRateEl = document.getElementById('base-rate');
+        
+        if (!healthContainer) return;
+        
+        let hasAlerts = false;
+        
+        // Show/hide emergency stop alert
+        if (emergencyStopAlert && healthStatus.emergency_stop) {
+            emergencyStopAlert.classList.remove('hidden');
+            hasAlerts = true;
+        } else if (emergencyStopAlert) {
+            emergencyStopAlert.classList.add('hidden');
+        }
+        
+        // Show/hide congestion alert
+        if (congestionAlert && healthStatus.is_throttled && !healthStatus.emergency_stop) {
+            congestionAlert.classList.remove('hidden');
+            if (currentRateEl) currentRateEl.textContent = healthStatus.current_rate || '-';
+            if (baseRateEl) baseRateEl.textContent = healthStatus.base_rate || '-';
+            hasAlerts = true;
+        } else if (congestionAlert) {
+            congestionAlert.classList.add('hidden');
+        }
+        
+        // Show/hide quiet hours alert
+        if (quietHoursAlert && healthStatus.is_quiet_hours && !healthStatus.emergency_stop) {
+            quietHoursAlert.classList.remove('hidden');
+            hasAlerts = true;
+        } else if (quietHoursAlert) {
+            quietHoursAlert.classList.add('hidden');
+        }
+        
+        // Show/hide the health status container
+        if (hasAlerts) {
+            healthContainer.classList.remove('hidden');
+        } else {
+            healthContainer.classList.add('hidden');
         }
     }
     
@@ -2078,13 +2126,35 @@ class ZephyrGateDashboard {
                 `${item.short_name} - ${item.long_name}` : 
                 (item.short_name || item.long_name || 'Unknown');
             
+            // Display traceroute hop count (from traceroute results)
+            let hopDisplay = 'N/A';
+            let hopClass = 'text-gray-400';
+            if (item.traceroute_hop_count !== null && item.traceroute_hop_count !== undefined) {
+                if (item.traceroute_hop_count === 0) {
+                    // Failed traceroute
+                    hopDisplay = '0';
+                    hopClass = 'text-red-600 font-semibold';
+                } else {
+                    // Successful traceroute
+                    hopDisplay = item.traceroute_hop_count;
+                    // Color code based on hop count
+                    if (item.traceroute_hop_count <= 2) {
+                        hopClass = 'text-green-600 font-semibold';
+                    } else if (item.traceroute_hop_count <= 4) {
+                        hopClass = 'text-yellow-600';
+                    } else {
+                        hopClass = 'text-orange-600';
+                    }
+                }
+            }
+            
             return `
             <tr class="border-b hover:bg-gray-50">
                 <td class="px-4 py-2 font-mono text-sm">${item.node_id}</td>
                 <td class="px-4 py-2">${displayName}</td>
                 <td class="px-4 py-2">${timestamp}</td>
                 <td class="px-4 py-2 text-center ${statusClass} font-bold">${statusIcon}</td>
-                <td class="px-4 py-2 text-center">${item.hop_count || 'N/A'}</td>
+                <td class="px-4 py-2 text-center ${hopClass}">${hopDisplay}</td>
             </tr>
             `;
         }).join('');
@@ -2095,7 +2165,7 @@ class ZephyrGateDashboard {
         if (!tbody) return;
         
         if (upcoming.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" class="px-4 py-8 text-center text-gray-500">No upcoming traceroutes scheduled.<br><span class="text-sm">Nodes with 0 hops (direct connections) are not scheduled when skip_direct_nodes is enabled.</span></td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-gray-500">No upcoming traceroutes scheduled.<br><span class="text-sm">Nodes with 0 hops (direct connections) are not scheduled when skip_direct_nodes is enabled.</span></td></tr>';
             return;
         }
         
@@ -2134,6 +2204,61 @@ class ZephyrGateDashboard {
             }
             
             const scheduledTime = item.scheduled_time ? new Date(item.scheduled_time).toLocaleString() : '<span class="text-gray-500 italic">-</span>';
+            
+            // Display traceroute hop count (from traceroute results, not message hop count)
+            let hopDisplay = '';
+            let hopClass = 'text-gray-400';
+            if (item.traceroute_hop_count !== null && item.traceroute_hop_count !== undefined) {
+                if (item.traceroute_hop_count === 0) {
+                    // Failed traceroute
+                    hopDisplay = '0';
+                    hopClass = 'text-red-600 font-semibold';
+                } else {
+                    // Successful traceroute
+                    hopDisplay = item.traceroute_hop_count;
+                    // Color code based on hop count
+                    if (item.traceroute_hop_count <= 2) {
+                        hopClass = 'text-green-600 font-semibold';
+                    } else if (item.traceroute_hop_count <= 4) {
+                        hopClass = 'text-yellow-600';
+                    } else {
+                        hopClass = 'text-orange-600';
+                    }
+                }
+            } else {
+                // Never attempted traceroute
+                hopDisplay = '-';
+                hopClass = 'text-gray-400';
+            }
+            
+            // Last traceroute attempt time and result
+            let lastAttempt = '';
+            let lastAttemptClass = 'text-gray-600';
+            if (item.last_traceroute_time) {
+                const lastTime = new Date(item.last_traceroute_time);
+                const now = new Date();
+                const diffMinutes = Math.floor((now - lastTime) / 60000);
+                
+                // Color based on success/failure
+                if (item.last_success === true) {
+                    lastAttemptClass = 'text-green-600';
+                } else if (item.last_success === false) {
+                    lastAttemptClass = 'text-red-600';
+                }
+                
+                if (diffMinutes < 60) {
+                    lastAttempt = `<div class="text-xs ${lastAttemptClass}">${diffMinutes}m ago</div>`;
+                } else if (diffMinutes < 1440) {
+                    const hours = Math.floor(diffMinutes / 60);
+                    lastAttempt = `<div class="text-xs ${lastAttemptClass}">${hours}h ago</div>`;
+                } else {
+                    const days = Math.floor(diffMinutes / 1440);
+                    lastAttempt = `<div class="text-xs ${lastAttemptClass}">${days}d ago</div>`;
+                }
+            } else {
+                lastAttempt = '<div class="text-xs text-gray-400">Never</div>';
+            }
+            
             const statusIcon = item.last_success === null ? '-' : (item.last_success ? '✓' : '✗');
             const statusClass = item.last_success === null ? 'text-gray-400' : (item.last_success ? 'text-green-600' : 'text-red-600');
             
@@ -2142,8 +2267,12 @@ class ZephyrGateDashboard {
                 <td class="px-4 py-2 font-mono text-sm">${item.node_id}</td>
                 <td class="px-4 py-2">${displayName}</td>
                 <td class="px-4 py-2">${statusBadge}</td>
+                <td class="px-4 py-2 text-center ${hopClass}">${hopDisplay}</td>
                 <td class="px-4 py-2">${timeUntil}</td>
-                <td class="px-4 py-2 text-center ${statusClass}">${statusIcon}</td>
+                <td class="px-4 py-2 text-center">
+                    ${lastAttempt}
+                    <div class="${statusClass}">${statusIcon}</div>
+                </td>
                 <td class="px-4 py-2 text-center">${actionButton}</td>
             </tr>
             `;

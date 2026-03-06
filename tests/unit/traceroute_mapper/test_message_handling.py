@@ -131,14 +131,14 @@ class TestNodeStateUpdate:
         """Test that direct nodes are correctly identified."""
         plugin = initialized_plugin
         
-        # Create a message from a direct node (hop_count=1)
+        # Create a message from a direct node (hop_count=0)
         message = Message(
             id='msg1',
             sender_id='!direct1',
             recipient_id='!gateway',
             message_type=MessageType.TEXT,
             content='Hello',
-            hop_count=1,
+            hop_count=0,  # 0 hops = direct connection
             snr=10.0,
             rssi=-75,
             metadata={}
@@ -192,14 +192,14 @@ class TestNewIndirectNodeDiscovery:
         """Test that direct nodes are not queued for traceroute."""
         plugin = initialized_plugin
         
-        # Create a message from a direct node
+        # Create a message from a direct node (hop_count=0)
         message = Message(
             id='msg1',
             sender_id='!direct1',
             recipient_id='!gateway',
             message_type=MessageType.TEXT,
             content='Hello',
-            hop_count=1,
+            hop_count=0,  # 0 hops = direct connection
             snr=10.0,
             rssi=-75,
             metadata={}
@@ -267,14 +267,14 @@ class TestDirectNodeTransition:
         assert plugin.priority_queue.contains('!node123')
         initial_queue_size = plugin.priority_queue.size()
         
-        # Now receive message showing node is direct
+        # Now receive message showing node is direct (hop_count=0)
         message2 = Message(
             id='msg2',
             sender_id='!node123',
             recipient_id='!gateway',
             message_type=MessageType.TEXT,
             content='Hello again',
-            hop_count=1,
+            hop_count=0,  # 0 hops = direct connection
             snr=10.0,
             rssi=-75,
             metadata={}
@@ -295,8 +295,12 @@ class TestNodeBackOnline:
     """Test handling of nodes coming back online."""
     
     @pytest.mark.asyncio
-    async def test_node_back_online_queues_with_priority_4(self, initialized_plugin):
-        """Test that nodes coming back online are queued with priority 4."""
+    async def test_node_back_online_not_queued_immediately(self, initialized_plugin):
+        """Test that nodes coming back online are NOT queued immediately.
+        
+        The simplified logic relies on the periodic check loop to queue nodes
+        that are past due for traceroute, not on detecting online/offline transitions.
+        """
         plugin = initialized_plugin
         
         # First, discover node as indirect
@@ -335,15 +339,9 @@ class TestNodeBackOnline:
         )
         await plugin._handle_mesh_message(message2, {})
         
-        # Verify traceroute was queued with priority 4 (NODE_BACK_ONLINE)
-        assert plugin.priority_queue.contains('!node123')
-        
-        # Dequeue and check priority
-        request = plugin.priority_queue.dequeue()
-        assert request is not None
-        assert request.node_id == '!node123'
-        assert request.priority == 4
-        assert request.reason == 'node_back_online'
+        # Verify traceroute was NOT queued immediately
+        # (will be queued by periodic check loop if past due)
+        assert not plugin.priority_queue.contains('!node123')
         
         # Verify was_offline flag was cleared
         node_state = plugin.node_tracker.get_node_state('!node123')

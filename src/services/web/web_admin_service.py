@@ -337,9 +337,14 @@ class WebSocketManager:
         self.connection_permissions[client_id] = permissions
         logger.info(f"WebSocket client {client_id} connected")
     
-    def disconnect(self, client_id: str):
+    async def disconnect(self, client_id: str):
         """Remove WebSocket connection"""
         if client_id in self.active_connections:
+            try:
+                websocket = self.active_connections[client_id]
+                await websocket.close()
+            except Exception as e:
+                logger.debug(f"Error closing WebSocket for {client_id}: {e}")
             del self.active_connections[client_id]
         if client_id in self.connection_permissions:
             del self.connection_permissions[client_id]
@@ -352,7 +357,7 @@ class WebSocketManager:
                 await self.active_connections[client_id].send_text(message)
             except Exception as e:
                 logger.error(f"Error sending message to {client_id}: {e}")
-                self.disconnect(client_id)
+                await self.disconnect(client_id)
     
     async def broadcast(self, message: str, permission_required: Optional[str] = None):
         """Broadcast message to all connected clients with permission"""
@@ -373,7 +378,7 @@ class WebSocketManager:
         
         # Clean up disconnected clients
         for client_id in disconnected_clients:
-            self.disconnect(client_id)
+            await self.disconnect(client_id)
 
 
 class Role:
@@ -2698,14 +2703,32 @@ class WebAdminService(BasePlugin):
             
             await self.websocket_manager.connect(websocket, client_id, permissions)
             try:
-                while True:
-                    data = await websocket.receive_text()
-                    # Handle WebSocket messages if needed
-                    await self.websocket_manager.send_personal_message(
-                        f"Echo: {data}", client_id
-                    )
+                while self.is_running:  # Check if service is still running
+                    try:
+                        # Use a timeout so we can check is_running periodically
+                        data = await asyncio.wait_for(
+                            websocket.receive_text(),
+                            timeout=1.0
+                        )
+                        # Handle WebSocket messages if needed
+                        await self.websocket_manager.send_personal_message(
+                            f"Echo: {data}", client_id
+                        )
+                    except asyncio.TimeoutError:
+                        # Timeout is normal, just check if we should continue
+                        continue
+                    except asyncio.CancelledError:
+                        # Shutdown in progress
+                        break
             except WebSocketDisconnect:
-                self.websocket_manager.disconnect(client_id)
+                pass
+            except asyncio.CancelledError:
+                # Shutdown in progress
+                pass
+            except Exception as e:
+                self.logger.error(f"Error in WebSocket endpoint: {e}")
+            finally:
+                await self.websocket_manager.disconnect(client_id)
         
         # Main dashboard route
         @self.app.get("/", response_class=HTMLResponse)
@@ -2864,7 +2887,7 @@ class WebAdminService(BasePlugin):
                     last_traceroute_time,
                     last_traceroute_success,
                     traceroute_failure_count,
-                    hop_count
+                    traceroute_hop_count
                 FROM users
                 WHERE last_traceroute_time IS NOT NULL
                 ORDER BY last_traceroute_time DESC
@@ -2880,7 +2903,7 @@ class WebAdminService(BasePlugin):
                     'timestamp': row[3],
                     'success': bool(row[4]) if row[4] is not None else None,
                     'failure_count': row[5] or 0,
-                    'hop_count': row[6]
+                    'traceroute_hop_count': row[6]  # Use traceroute_hop_count instead of hop_count
                 })
             
             return history
@@ -2904,7 +2927,7 @@ class WebAdminService(BasePlugin):
             
             # Query for upcoming traceroutes - show nodes that:
             # 1. Have a scheduled time (next_traceroute_time IS NOT NULL)
-            # 2. OR are active indirect nodes that haven't been scheduled yet (NULL next_traceroute_time)
+            # 2. Are indirect nodes (hop_count >= 1) - never show direct nodes
             query = """
                 SELECT 
                     node_id,
@@ -2914,13 +2937,15 @@ class WebAdminService(BasePlugin):
                     last_traceroute_success,
                     traceroute_failure_count,
                     last_seen,
-                    hop_count
+                    hop_count,
+                    last_traceroute_time,
+                    traceroute_hop_count
                 FROM users
-                WHERE (
+                WHERE hop_count >= 1
+                AND (
                     next_traceroute_time IS NOT NULL
                     OR (
                         next_traceroute_time IS NULL 
-                        AND hop_count >= 1
                         AND last_seen > datetime('now', '-24 hours')
                     )
                 )
@@ -2942,6 +2967,8 @@ class WebAdminService(BasePlugin):
             for row in rows:
                 node_id = row[0]
                 next_time_str = row[3]
+                last_traceroute_time = row[8]
+                traceroute_hop_count = row[9]  # New field
                 
                 # Check if node is in queue
                 in_queue = False
@@ -2949,6 +2976,7 @@ class WebAdminService(BasePlugin):
                     in_queue = traceroute_plugin.priority_queue.contains(node_id)
                 
                 # Handle nodes that haven't been scheduled yet (NULL next_traceroute_time)
+                # These should be picked up by periodic recheck within 60 seconds
                 if next_time_str is None:
                     upcoming.append({
                         'node_id': node_id,
@@ -2960,9 +2988,11 @@ class WebAdminService(BasePlugin):
                         'failure_count': row[5] or 0,
                         'last_seen': row[6],
                         'hop_count': row[7],
-                        'is_overdue': False,  # Not overdue, just not scheduled yet
+                        'traceroute_hop_count': traceroute_hop_count,  # Add traceroute hop count
+                        'last_traceroute_time': last_traceroute_time,
+                        'is_overdue': False,
                         'in_queue': in_queue,
-                        'status': 'queued' if in_queue else 'awaiting_queue'
+                        'status': 'queued' if in_queue else 'pending'  # Pending = waiting for periodic recheck
                     })
                 else:
                     try:
@@ -2990,6 +3020,8 @@ class WebAdminService(BasePlugin):
                             'failure_count': row[5] or 0,
                             'last_seen': row[6],
                             'hop_count': row[7],
+                            'traceroute_hop_count': traceroute_hop_count,  # Add traceroute hop count
+                            'last_traceroute_time': last_traceroute_time,
                             'is_overdue': False,  # Don't show as overdue, show as pending instead
                             'in_queue': in_queue,
                             'status': status
@@ -3211,7 +3243,9 @@ class WebAdminService(BasePlugin):
                 app=self.app,
                 host=self.host,
                 port=self.port,
-                log_level="info" if not self.debug else "debug"
+                log_level="info" if not self.debug else "debug",
+                access_log=False,  # Disable HTTP access logging to reduce log noise
+                lifespan="off"  # Disable lifespan to prevent hanging on shutdown
             )
             self.server = uvicorn.Server(config)
             
@@ -3404,19 +3438,39 @@ class WebAdminService(BasePlugin):
         try:
             self.is_running = False
             
+            # Close all WebSocket connections first
+            self.logger.info("Closing WebSocket connections...")
+            client_ids = list(self.websocket_manager.active_connections.keys())
+            for client_id in client_ids:
+                try:
+                    await asyncio.wait_for(
+                        self.websocket_manager.disconnect(client_id),
+                        timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    self.logger.warning(f"Timeout closing WebSocket {client_id}")
+                except Exception as e:
+                    self.logger.debug(f"Error closing WebSocket {client_id}: {e}")
+            
             # Stop system monitor
             await self.system_monitor.stop()
             
             # Stop scheduler
             await self.scheduler.stop()
             
+            # Force server shutdown
             if self.server:
                 self.server.should_exit = True
+                # Also force close the server
+                if hasattr(self.server, 'force_exit'):
+                    self.server.force_exit = True
             
             if self.server_task:
                 self.server_task.cancel()
                 try:
-                    await self.server_task
+                    await asyncio.wait_for(self.server_task, timeout=1.0)
+                except asyncio.TimeoutError:
+                    self.logger.warning("Timeout waiting for server task after 1 second")
                 except asyncio.CancelledError:
                     pass
             
@@ -3431,9 +3485,10 @@ class WebAdminService(BasePlugin):
     async def cleanup(self) -> bool:
         """Clean up web service resources"""
         try:
-            # Close any remaining connections
-            for client_id in list(self.websocket_manager.active_connections.keys()):
-                self.websocket_manager.disconnect(client_id)
+            # Close any remaining WebSocket connections
+            client_ids = list(self.websocket_manager.active_connections.keys())
+            for client_id in client_ids:
+                await self.websocket_manager.disconnect(client_id)
             
             self.logger.info("WebAdminService cleanup completed")
             return True
@@ -4338,7 +4393,13 @@ class WebAdminService(BasePlugin):
             start_time = None
             if hasattr(plugin_instance, 'start_time') and plugin_instance.start_time:
                 start_time = plugin_instance.start_time.isoformat()
-                uptime = int((datetime.now(timezone.utc) - plugin_instance.start_time).total_seconds())
+                # Handle both timezone-aware and naive datetimes
+                now = datetime.now(timezone.utc)
+                plugin_start = plugin_instance.start_time
+                if plugin_start.tzinfo is None:
+                    # If start_time is naive, make it UTC
+                    plugin_start = plugin_start.replace(tzinfo=timezone.utc)
+                uptime = int((now - plugin_start).total_seconds())
             
             # Get health information
             health_info = {}
@@ -4352,6 +4413,14 @@ class WebAdminService(BasePlugin):
                         "restart_count": health_data.get('restart_count', 0),
                         "last_restart": health_data.get('last_restart'),
                     }
+            
+            # Get plugin-specific health status (if available)
+            health_status = {}
+            if hasattr(plugin_instance.instance, 'get_health_status'):
+                try:
+                    health_status = await plugin_instance.instance.get_health_status()
+                except Exception as e:
+                    self.logger.debug(f"Could not get health status for {plugin_name}: {e}")
             
             # Get configuration
             config = {}
@@ -4383,6 +4452,7 @@ class WebAdminService(BasePlugin):
                 "start_time": start_time,
                 "dependencies": metadata.dependencies if metadata else [],
                 "health": health_info,
+                "health_status": health_status,  # Plugin-specific health status
                 "config": config,
                 "manifest": manifest_info,
             }

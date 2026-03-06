@@ -656,7 +656,7 @@ class ZephyrGateApplication:
             
             # Close database connections
             if self.db_manager:
-                self.db_manager.close()
+                await asyncio.to_thread(self.db_manager.close)
             
             self.logger.info("ZephyrGate shutdown complete")
             
@@ -946,20 +946,62 @@ async def main():
     except KeyboardInterrupt:
         logger = get_logger('main')
         logger.info("Shutdown requested by user")
+        try:
+            # Give shutdown 2 seconds, then force exit
+            await asyncio.wait_for(app.shutdown(), timeout=2.0)
+        except asyncio.TimeoutError:
+            logger.warning("Shutdown timed out after 2 seconds, forcing exit")
     except Exception as e:
         logger = get_logger('main')
         logger.error(f"Application failed to start: {e}", exc_info=True)
+        try:
+            await asyncio.wait_for(app.shutdown(), timeout=2.0)
+        except asyncio.TimeoutError:
+            logger.warning("Shutdown timed out after 2 seconds")
         sys.exit(1)
 
 
 if __name__ == "__main__":
     # Run the application
+    import signal
+    import threading
+    import os
+    
+    shutdown_initiated = False
+    
+    def force_exit_after_timeout():
+        """Force exit if shutdown takes too long"""
+        import time
+        time.sleep(3.0)  # Wait 3 seconds for clean shutdown
+        print("\n⚠️  Shutdown timeout - forcing exit...", flush=True)
+        os._exit(1)
+    
+    def signal_handler(signum, frame):
+        """Handle Ctrl+C - force exit after brief shutdown attempt"""
+        global shutdown_initiated
+        if not shutdown_initiated:
+            shutdown_initiated = True
+            print("\n🛑 Shutdown requested (Ctrl+C)...", flush=True)
+            # Start a timer thread that will force exit after 3 seconds
+            timer = threading.Thread(target=force_exit_after_timeout, daemon=False)
+            timer.start()
+            # Raise KeyboardInterrupt to trigger shutdown
+            raise KeyboardInterrupt()
+        else:
+            # Second Ctrl+C - exit immediately
+            print("\n⚠️  Force exit (second Ctrl+C)", flush=True)
+            os._exit(0)
+    
+    # Install signal handler
+    signal.signal(signal.SIGINT, signal_handler)
+    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         # Clean exit on Ctrl+C
-        sys.exit(0)
+        print("✓ Shutdown complete", flush=True)
+        os._exit(0)
     except Exception as e:
         # Log fatal errors to stderr
         sys.stderr.write(f"Fatal error: {e}\n")
-        sys.exit(1)
+        os._exit(1)

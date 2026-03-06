@@ -592,7 +592,7 @@ class MQTTGatewayPlugin(EnhancedPlugin):
         Returns:
             None (this plugin doesn't generate responses)
         """
-        self.logger.info(f"MQTT Gateway received message: type={message.message_type.value}, id={message.id}, sender={message.sender_id}")
+        self.logger.debug(f"MQTT Gateway received message: type={message.message_type.value}, id={message.id}, sender={message.sender_id}")
         context = {
             'timestamp': datetime.now(datetime.UTC) if hasattr(datetime, 'UTC') else datetime.utcnow(),
             'plugin_name': self.name

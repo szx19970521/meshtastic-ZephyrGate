@@ -481,7 +481,31 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ## Security
 
-ZephyrGate implements multiple security layers:
+### ⚠️ CRITICAL: Web Interface Security Warning
+
+**THE WEB INTERFACE IS NOT SAFE FOR PUBLIC INTERNET EXPOSURE**
+
+The ZephyrGate web interface is designed for **administrative access only** and uses basic authentication. It is **NOT** hardened for public internet exposure.
+
+**IMPORTANT:**
+- The web interface should **ONLY** be accessed on trusted local networks
+- **DO NOT** expose the web interface directly to the internet
+- **DO NOT** port forward the web interface through your router
+- The web interface uses basic authentication which is insufficient for internet-facing services
+- **IF YOU EXPOSE THE WEB INTERFACE TO THE INTERNET, YOU DO SO AT YOUR OWN RISK**
+
+The developers are not responsible for any security breaches, data loss, or unauthorized access resulting from exposing the web interface to untrusted networks.
+
+**For remote access, use:**
+- SSH tunneling: `ssh -L 8080:localhost:8080 user@your-server`
+- VPN (WireGuard, OpenVPN)
+- Reverse proxy with proper SSL/TLS and additional authentication
+
+**See the [Admin Guide](docs/ADMIN_GUIDE.md#security) for detailed security recommendations.**
+
+### Security Features
+
+ZephyrGate implements multiple security layers for local network use:
 
 - **Authentication**: JWT-based with configurable expiration
 - **Authorization**: Role-based access control (RBAC)
@@ -489,6 +513,8 @@ ZephyrGate implements multiple security layers:
 - **Input Validation**: Comprehensive sanitization and validation
 - **Rate Limiting**: Protection against abuse and DoS
 - **Audit Logging**: Complete activity audit trails
+
+**Remember:** Change the default admin credentials (`admin`/`admin`) immediately after installation!
 
 ## Monitoring and Backup
 

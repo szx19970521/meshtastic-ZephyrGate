@@ -124,11 +124,22 @@ class MeshtasticInterface(ABC):
         """Stop the interface"""
         self.logger.info(f"Stopping interface {self.config.id}")
         
+        # Disable to stop connection manager loop
+        self.config.enabled = False
+        
         # Cancel tasks
         if self.receive_task:
             self.receive_task.cancel()
+            try:
+                await self.receive_task
+            except asyncio.CancelledError:
+                pass
         if self.send_task:
             self.send_task.cancel()
+            try:
+                await self.send_task
+            except asyncio.CancelledError:
+                pass
         
         # Disconnect
         await self._disconnect()
@@ -923,11 +934,16 @@ class SerialInterface(MeshtasticInterface):
                 self.logger.info(f"Sending traceroute to {message.recipient_id} (hop_limit={hop_limit})")
                 
                 # Use the proper sendTraceRoute method which handles the protocol correctly
-                self.connection.sendTraceRoute(
-                    dest=message.recipient_id,
-                    hopLimit=hop_limit,
-                    channelIndex=message.channel
-                )
+                # CRITICAL: Run in thread pool to avoid blocking the event loop
+                def send_traceroute_blocking():
+                    """Send traceroute in thread pool to avoid blocking"""
+                    self.connection.sendTraceRoute(
+                        dest=message.recipient_id,
+                        hopLimit=hop_limit,
+                        channelIndex=message.channel
+                    )
+                
+                await asyncio.to_thread(send_traceroute_blocking)
                 
                 # Note: The Meshtastic library prints traceroute results to stdout
                 # but doesn't publish them through pubsub in a parseable way.

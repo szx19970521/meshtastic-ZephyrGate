@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ZephyrGate Administration</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png">
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
@@ -337,6 +338,42 @@
                             <i class="fas fa-clock mr-2 text-green-600"></i>Upcoming Traceroutes
                         </h3>
                         
+                        <!-- Traceroute Health Status -->
+                        <div id="traceroute-health-status" class="mb-4 hidden">
+                            <!-- Emergency Stop Alert -->
+                            <div id="emergency-stop-alert" class="hidden mb-3 p-3 bg-red-100 border border-red-400 rounded-lg">
+                                <div class="flex items-center">
+                                    <i class="fas fa-exclamation-triangle text-red-600 mr-2"></i>
+                                    <div>
+                                        <div class="font-semibold text-red-800">Emergency Stop Active</div>
+                                        <div class="text-sm text-red-700">Traceroutes are paused due to high failure rate</div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Congestion Throttle Alert -->
+                            <div id="congestion-alert" class="hidden mb-3 p-3 bg-yellow-100 border border-yellow-400 rounded-lg">
+                                <div class="flex items-center">
+                                    <i class="fas fa-exclamation-circle text-yellow-600 mr-2"></i>
+                                    <div>
+                                        <div class="font-semibold text-yellow-800">Network Congestion Detected</div>
+                                        <div class="text-sm text-yellow-700">Traceroute rate reduced to <span id="current-rate">-</span>/min (normal: <span id="base-rate">-</span>/min)</div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Quiet Hours Alert -->
+                            <div id="quiet-hours-alert" class="hidden mb-3 p-3 bg-blue-100 border border-blue-400 rounded-lg">
+                                <div class="flex items-center">
+                                    <i class="fas fa-moon text-blue-600 mr-2"></i>
+                                    <div>
+                                        <div class="font-semibold text-blue-800">Quiet Hours Active</div>
+                                        <div class="text-sm text-blue-700">Traceroutes are paused during configured quiet hours</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
                         <!-- Traceroute Statistics -->
                         <div id="traceroute-stats" class="mb-4 p-3 bg-gray-50 rounded text-sm grid grid-cols-4 gap-2">
                             <div class="text-center">
@@ -364,6 +401,7 @@
                                         <th class="px-3 py-2 text-left">Node ID</th>
                                         <th class="px-3 py-2 text-left">Name</th>
                                         <th class="px-3 py-2 text-left">Status</th>
+                                        <th class="px-3 py-2 text-center">Hops</th>
                                         <th class="px-3 py-2 text-left">Time Until</th>
                                         <th class="px-3 py-2 text-center">Last</th>
                                         <th class="px-3 py-2 text-center">Action</th>
@@ -371,7 +409,7 @@
                                 </thead>
                                 <tbody id="upcoming-traceroutes-tbody">
                                     <tr>
-                                        <td colspan="6" class="px-4 py-8 text-center text-gray-500">No upcoming traceroutes</td>
+                                        <td colspan="7" class="px-4 py-8 text-center text-gray-500">No upcoming traceroutes</td>
                                     </tr>
                                 </tbody>
                             </table>

@@ -356,22 +356,29 @@ mqtt_gateway:
 
 Web-based administration interface.
 
+**⚠️ SECURITY WARNING:** The web interface is designed for administrative access on trusted local networks ONLY. It uses basic authentication and is NOT safe for public internet exposure. DO NOT expose this interface to the internet without additional security measures (reverse proxy with SSL/TLS, VPN, etc.). If you expose it to the internet, you do so at your own risk.
+
 ```yaml
 web_service:
   enabled: true
-  host: "0.0.0.0"                    # Listen address (0.0.0.0 = all interfaces)
+  host: "127.0.0.1"                  # Listen address (127.0.0.1 = localhost only, RECOMMENDED)
+                                     # Use "0.0.0.0" only on trusted networks
   port: 8080                         # HTTP port
   admin_username: "admin"            # Admin username
-  admin_password: "changeme"         # Admin password (change this!)
+  admin_password: "changeme"         # Admin password (CHANGE THIS IMMEDIATELY!)
   session_timeout_minutes: 60        # Session timeout
   enable_api: true                   # Enable REST API
   enable_websocket: true             # Enable WebSocket for real-time updates
+  active_node_timeout_minutes: 60    # Minutes before a node is considered inactive
 ```
 
 **Security Notes:**
-- Always change default password
-- Use HTTPS in production (configure reverse proxy)
-- Restrict `host` to specific interface if needed
+- **CRITICAL:** Change default password immediately after installation
+- **RECOMMENDED:** Set `host: "127.0.0.1"` to restrict access to localhost only
+- For remote access, use SSH tunneling or VPN instead of exposing to internet
+- If you must expose to internet, use a reverse proxy with SSL/TLS and additional authentication
+- The web interface provides full administrative control - unauthorized access compromises your entire mesh network
+- See [Admin Guide Security Section](ADMIN_GUIDE.md#security) for detailed security recommendations
 
 ---
 

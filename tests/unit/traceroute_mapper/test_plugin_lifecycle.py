@@ -30,8 +30,11 @@ def minimal_config():
     """Minimal valid configuration for the plugin."""
     return {
         'enabled': True,
-        'traceroutes_per_minute': 1,
+        'seconds_between_traceroutes': 60,  # 60 seconds = 1 per minute
         'burst_multiplier': 2,
+        'traceroute_interval_minutes': 180,
+        'traceroute_retry_minutes': 30,
+        'active_node_hours': 24,
         'queue_max_size': 500,
         'queue_overflow_strategy': 'drop_lowest_priority',
         'clear_queue_on_startup': False,
@@ -444,7 +447,7 @@ class TestPluginMetadata:
         metadata = plugin.get_metadata()
         
         assert metadata.name == 'traceroute_mapper'
-        assert metadata.version == '1.0.0'
+        assert metadata.version == '1.2.0'
         assert 'Network Traceroute Mapper' in metadata.description
         assert metadata.author == 'ZephyrGate Team'
 

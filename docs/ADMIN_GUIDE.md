@@ -677,6 +677,71 @@ permissions:
 
 ## Security
 
+### ⚠️ CRITICAL: Web Interface Security Warning
+
+**THE WEB INTERFACE IS NOT SAFE FOR PUBLIC INTERNET EXPOSURE**
+
+The ZephyrGate web interface is designed for **administrative access only** and uses basic authentication. It is **NOT** hardened for public internet exposure and should **ONLY** be accessed on trusted local networks.
+
+**IMPORTANT SECURITY CONSIDERATIONS:**
+
+1. **DO NOT expose the web interface directly to the internet** without additional security measures
+2. **DO NOT port forward** the web interface through your router
+3. **DO NOT use weak passwords** - the default credentials MUST be changed immediately
+4. **The web interface uses basic authentication** which is not sufficient for internet-facing services
+5. **No rate limiting or advanced security features** are enabled by default
+
+**IF YOU CHOOSE TO EXPOSE THE WEB INTERFACE TO THE INTERNET, YOU DO SO AT YOUR OWN RISK**
+
+The developers are not responsible for any security breaches, data loss, or unauthorized access resulting from exposing the web interface to untrusted networks.
+
+**RECOMMENDED SECURITY PRACTICES:**
+
+1. **Local Access Only (Recommended):**
+   ```yaml
+   web_service:
+     host: 127.0.0.1  # Only accessible from localhost
+     port: 8080
+   ```
+
+2. **Use SSH Tunneling for Remote Access:**
+   ```bash
+   # From remote machine, create SSH tunnel
+   ssh -L 8080:localhost:8080 user@your-zephyrgate-server
+   
+   # Then access via http://localhost:8080 in your browser
+   ```
+
+3. **Use a Reverse Proxy with Authentication:**
+   - Deploy nginx or Apache with proper SSL/TLS
+   - Add additional authentication layers
+   - Implement rate limiting and IP restrictions
+   - Use fail2ban for brute force protection
+
+4. **Use a VPN:**
+   - Access your ZephyrGate server through a VPN (WireGuard, OpenVPN)
+   - Keep the web interface on the local network only
+
+5. **Change Default Credentials Immediately:**
+   - Default username: `admin`
+   - Default password: `admin`
+   - **CHANGE THESE IMMEDIATELY AFTER INSTALLATION**
+
+**For Internet Access (Advanced Users Only):**
+
+If you absolutely must expose the web interface to the internet, implement ALL of the following:
+
+- Use a reverse proxy (nginx/Apache) with SSL/TLS certificates
+- Implement strong authentication (OAuth2, SAML, or multi-factor authentication)
+- Use IP whitelisting to restrict access to known addresses
+- Enable rate limiting and DDoS protection
+- Use fail2ban or similar tools to block brute force attempts
+- Keep all software updated with security patches
+- Monitor access logs regularly for suspicious activity
+- Use a Web Application Firewall (WAF)
+
+**Remember: The web interface provides full administrative control over your ZephyrGate system. Unauthorized access could compromise your entire mesh network.**
+
 ### Web Interface Security
 
 ```yaml
@@ -686,7 +751,7 @@ web:
     session_timeout: 3600
     require_auth: true
     default_username: "admin"
-    default_password: "admin"  # CHANGE THIS!
+    default_password: "admin"  # CHANGE THIS IMMEDIATELY!
     
   security:
     max_login_attempts: 5
